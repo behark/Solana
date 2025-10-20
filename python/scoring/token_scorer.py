@@ -430,22 +430,22 @@ class TokenScorer:
 
         # Very low liquidity (below $10k minimum)
         if token_data.get('liquidity_usd', 0) < self.min_liquidity_usd:
-            penalty += 100  # Auto-reject
+            penalty += 10  # Small penalty, not auto-reject
             analysis['warnings'].append(f"Liquidity below minimum ${self.min_liquidity_usd}")
 
         # Low market cap (below $8k minimum)
         if token_data.get('market_cap', 0) < self.min_market_cap_usd:
-            penalty += 100  # Auto-reject
+            penalty += 5  # Warning only, not auto-reject
             analysis['warnings'].append(f"Market cap below minimum ${self.min_market_cap_usd}")
 
         # Low volume (below $3k minimum)
         if token_data.get('volume_24h', 0) < self.min_volume_24h:
-            penalty += 50
+            penalty += 5  # Warning only
             analysis['warnings'].append(f"Volume below minimum ${self.min_volume_24h}")
 
         # Not enough holders
         if token_data.get('holders', 0) < self.min_holders:
-            penalty += 100  # Auto-reject
+            penalty += 5  # Warning only, not auto-reject
             analysis['warnings'].append(f"Holders below minimum {self.min_holders}")
 
         # No social presence
@@ -455,7 +455,7 @@ class TokenScorer:
 
         # High tax rates (above 5%)
         if token_data.get('buy_tax', 0) > self.max_buy_tax or token_data.get('sell_tax', 0) > self.max_sell_tax:
-            penalty += 100  # Auto-reject
+            penalty += 20  # Significant penalty but not auto-reject
             analysis['warnings'].append(f"Tax rates above maximum {self.max_buy_tax}%")
 
         return penalty
