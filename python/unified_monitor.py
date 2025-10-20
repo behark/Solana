@@ -154,6 +154,12 @@ class UnifiedMonitor:
             # Enrich token data with market info
             enriched_data = await self.enrich_token_data(token_data)
 
+            # Debug: Log enrichment results
+            logger.info(f"Enriched data - Liquidity: ${enriched_data.get('liquidity_usd', 0):,.0f}, "
+                        f"Volume: ${enriched_data.get('volume_24h', 0):,.0f}, "
+                        f"Holders: {enriched_data.get('holders', 0)}, "
+                        f"MarketCap: ${enriched_data.get('market_cap', 0):,.0f}")
+
             # Score the token
             score, analysis = await self.scorer.score_token(enriched_data)
             enriched_data['score'] = score
@@ -200,7 +206,13 @@ class UnifiedMonitor:
             if not self.session:
                 self.session = aiohttp.ClientSession()
 
-            url = f"{DEXSCREENER_API}/pairs/{token_data['chain']}/{token_data['pair_address']}"
+            # Get pair/pool address (different field names for V2 vs V3)
+            pair_address = token_data.get('pair_address') or token_data.get('pool_address') or token_data.get('mint_address')
+            if not pair_address:
+                logger.debug(f"No pair/pool address found for token: {token_data.get('symbol', 'Unknown')}")
+                return token_data
+
+            url = f"{DEXSCREENER_API}/pairs/{token_data['chain']}/{pair_address}"
             async with self.session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
