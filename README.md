@@ -1,197 +1,113 @@
 ## Solana PumpFun/PumpSwap Raydium Copy/Sniper Trading Bot
 
-High-performance Rust bot that monitors wallets and DEX activity on Solana and automatically copies/snipes trades. It supports PumpFun, PumpSwap,  Raydium launchpad, Raydium Cpmm, Raydium Amm, Meteora DBC and Meteora Damm. It integrates a configurable selling engine with dynamic trailing stops. Jupiter is used for token liquidation.
+This project is a high-performance Solana trading bot written in Rust, with a Python-based monitoring system. The bot is designed to snipe new token launches and copy trades from target wallets on various DEXs, including PumpFun, PumpSwap, and Raydium.
 
-### Key Features
+### Architecture
 
-- **Real-time monitoring**: Yellowstone gRPC stream, parallel task processing
-- **Protocols**: PumpFun (trade), PumpSwap (notify-only by default)
-- **Copy trading**: Follow one or many target wallets with exclusions
-- **Risk & selling**: Take profit, stop loss, dynamic trailing stop, copy-selling of existing balances
-- **Tx landing**: Zeroslot or normal mode, configurable priority fees
-- **Utilities**: Wrap/unwrap SOL, close empty token accounts, sell all tokens via Jupiter
+The system is composed of two main components:
 
----
+1.  **Python Monitoring System (`unified_monitor.py`):** This script is responsible for discovering new tokens. It uses a combination of direct blockchain monitoring and public APIs to gather information about new tokens, score them, and send alerts via Telegram.
+2.  **Rust Trading Bot:** The core of the system, written in Rust for high performance and reliability. The bot reads the tokens discovered by the Python monitor from a file-based queue (`token_queue.json`) and executes trades based on a configurable strategy.
 
-### How it works (logic)
+This decoupled architecture allows for a clear separation of concerns and makes the system more modular and easier to maintain.
 
-1. Load `.env`, build `Config` and initialize clients (RPC, Yellowstone, ZeroSlot, wallet).
-2. Start the `BlockhashProcessor`, token-account cache, and cache maintenance.
-3. Initialize `SellingEngine` from env and optionally start copy-selling for existing tokens.
-4. Launch two monitors in parallel:
-   - Target wallet monitoring (`processor/sniper_bot.rs`)
-   - DEX monitoring (`processor/sniper_bot.rs`), protocol auto-detection or preference
-5. Parse candidate transactions/logs, filter excluded addresses and apply limits.
-6. Execute swaps. Apply slippage and priority-fee settings; optionally use ZeroSlot mode.
-7. Manage positions with the selling strategy (TP/SL/dynamic trailing). Liquidation paths use Jupiter.
-8. Maintain a per-token 20-slot time-series (price, buy/sell volume) to detect post-drop bottoms, enabling sniper entries and informed copy trades.
+### Features
 
-```mermaid
-flowchart TD
-  A[Start] --> B[Load .env]
-  B --> C[Init RPC, Yellowstone, ZeroSlot, Wallet]
-  C --> D[Start Blockhash Processor]
-  D --> E[Init Token Account Cache]
-  E --> F[Start Cache Maintenance]
-  F --> G[Init Selling Engine]
-  G --> H{Run monitors in parallel}
-  H --> I[Target Wallet Monitoring]
-  H --> J[DEX Monitoring]
-  I --> K[Parse txs/logs]
-  J --> K
-  K --> L{Protocol match}
-  L --> |PumpFun| M[Execute swap]
-  L --> |PumpSwap| N[Notify only]
-  M --> O[Update selling / copy-sell]
-  O --> P[Dynamic trailing / TP / SL]
-  P --> Q[Jupiter sell path]
-  K --> R[Update 20-slot time series]
-  R --> S{Bottom detected?}
-  S --> |Yes| M
-  S --> |No| H
-  N --> Q
-```
-
----
-
-### Project structure
-
-```
-src/
-  common/                # config, constants, logger, caches
-  common/timeseries.rs   # 20-slot price & volume time-series, bottom detection
-  library/               # blockhash processor, jupiter client, rpc, zeroslot
-  processor/             # monitoring, swap/execution, selling, risk mgmt, parsing
-  dex/                   # protocol adapters: pump_fun.rs, pump_swap.rs, raydium_launchpad.rs
-  block_engine/          # helpers for token accounts & txs
-  error/                 # error types
-  main.rs                # entrypoint & CLI helpers (wrap/unwrap/sell/close)
-```
-
-Important files:
-
-- `src/main.rs`: starts services, parallel monitors, CLI helpers (`--wrap`, `--unwrap`, `--sell`, `--close`).
-- `src/common/config.rs`: loads env, builds `Config`, RPC/yellowstone clients, wallet, slippage, fees.
-- `src/processor/sniper_bot.rs`: wallet/DEX monitoring orchestration.
-- `src/processor/selling_strategy.rs`: selling engine with dynamic trailing stop.
-- `src/library/jupiter_api.rs`: quotes and executes swaps for liquidation.
-- `src/library/blockhash_processor.rs`: keeps recent blockhashes updated.
-
----
+-   **Real-time token discovery:** The Python monitor uses a combination of methods to discover new tokens as soon as they are created.
+-   **Data enrichment:** The monitor enriches the token data with information from public APIs, such as liquidity, volume, and price.
+-   **Token scoring:** A configurable scoring system helps to identify the most promising tokens.
+-   **Telegram alerts:** The monitor sends alerts via Telegram for new tokens that meet a certain score threshold.
+-   **High-performance trading:** The Rust bot is designed for low-latency trade execution.
+-   **Configurable trading strategy:** The bot's trading strategy can be configured through environment variables.
+-   **File-based communication:** The Python monitor and the Rust bot communicate through a simple and reliable file-based queue.
 
 ### Setup
 
-Prerequisites:
+1.  **Prerequisites:**
+    *   Rust toolchain (stable)
+    *   Python 3.8+
+    *   A Solana RPC endpoint
+    *   A Yellowstone gRPC endpoint
+    *   A Telegram bot token and chat ID
 
-- Rust toolchain (stable), Cargo
-- Access to a Solana RPC (`RPC_HTTP`) and Yellowstone gRPC endpoint
+2.  **Clone the repository:**
 
-1) Clone and create env file
+    ```bash
+    git clone https://github.com/your-org/solana-copy-sniper-trading-bot.git
+    cd solana-copy-sniper-trading-bot
+    ```
 
-```bash
-cp src/env.example .env
-# Edit .env with your keys and endpoints
-```
+    > **Note:** Replace `your-org` with the actual GitHub organization/username
 
-2) Build
+3.  **Install dependencies:**
 
-```bash
-cargo build --release
-```
+    ```bash
+    # Install Rust dependencies
+    cargo build --release
 
-3) Run
+    # Install Python dependencies
+    pip install -r python/requirements.txt
+    ```
 
-```bash
-cargo run --release
-```
+4.  **Configure the environment:**
 
-CLI helpers (run one at a time):
+    Create a `.env` file in the root of the project and add the following environment variables:
 
-```bash
-cargo run --release -- --wrap      # Wrap WRAP_AMOUNT SOL to WSOL
-cargo run --release -- --unwrap    # Unwrap WSOL back to SOL
-cargo run --release -- --sell      # Sell all tokens via Jupiter
-cargo run --release -- --close     # Close all token accounts (excl. WSOL with balance)
-```
+    ```
+    # Solana RPC endpoint
+    RPC_HTTP=<your-rpc-endpoint>
 
----
+    # Yellowstone gRPC endpoint
+    YELLOWSTONE_GRPC_HTTP=<your-yellowstone-endpoint>
+    YELLOWSTONE_GRPC_TOKEN=<your-yellowstone-token>
 
-### Environment variables
+    # Telegram bot token and chat ID
+    TELEGRAM_BOT_TOKEN=<your-telegram-bot-token>
+    TELEGRAM_CHAT_ID=<your-telegram-chat-id>
 
-Copy from `src/env.example` and adjust. Key settings (not exhaustive):
+    # Trading configuration
+    PRIVATE_KEY=<your-private-key>
+    COPY_TRADING_TARGET_ADDRESS=<target-wallet-address>
+    TOKEN_AMOUNT=0.001
+    SLIPPAGE=3000
+    TAKE_PROFIT=8.0
+    STOP_LOSS=-2
+    MAX_HOLD_TIME=3600
+    MIN_LIQUIDITY=4
+    WRAP_AMOUNT=0.5
 
-- Targeting & trading
-  - `COPY_TRADING_TARGET_ADDRESS`: comma-separated wallet list to follow
-  - `IS_MULTI_COPY_TRADING`: `true`/`false`
-  - `EXCLUDED_ADDRESSES`: comma-separated addresses to ignore
-  - `COUNTER_LIMIT`: max number of trades
-  - `TOKEN_AMOUNT`: buy amount (qty if `SwapInType::Qty`)
-  - `SLIPPAGE`: basis points (e.g. 3000 = 30%)
-  - `TRANSACTION_LANDING_SERVICE`: `0|zeroslot` or `1|normal`
+    # See src/env.example for complete list of environment variables
+    ```
 
-- Fees & priority
-  - `SELLING_UNIT_PRICE`: priority fee for selling txs (default 4_000_000)
-  - `SELLING_UNIT_LIMIT`: compute units for selling
-  - `ZERO_SLOT_TIP_VALUE`: tip used in zeroslot mode
+### Running the System
 
-- Selling strategy
-  - `COPY_SELLING_LIMIT`: initial multiple to start copy-selling
-  - `TAKE_PROFIT`, `STOP_LOSS`, `MAX_HOLD_TIME`
-  - `DYNAMIC_TRAILING_STOP_THRESHOLDS`: e.g. `20:5,50:10,100:30,200:100,500:100,1000:100`
-  - `DYNAMIC_RETRACEMENT_PERCENTAGE`, `RETRACEMENT_PNL_THRESHOLD`, `RETRACEMENT_THRESHOLD`
-  - `MIN_LIQUIDITY`
-  - Time-series bottom detection (optional, future envs): `BOTTOM_MIN_DROP_PCT`, `BOTTOM_SELL_DECLINE_PCT`, `BOTTOM_STABILIZE_SLOTS`
+The system consists of two independent processes that need to be run separately:
 
-- Sniper focus
-  - `FOCUS_DROP_THRESHOLD_PCT`: fraction drop to mark token as dropped
-  - `FOCUS_TRIGGER_SOL`: buy trigger size after drop (in SOL)
+1.  **Run the Python monitor:**
 
-- Endpoints
-  - `RPC_HTTP`: HTTP RPC endpoint
-  - `RPC_WSS`: optional WSS endpoint
-  - `YELLOWSTONE_GRPC_HTTP`: Yellowstone gRPC URL
-  - `YELLOWSTONE_GRPC_TOKEN`: Yellowstone token
-  - `ZERO_SLOT_URL`, `ZERO_SLOT_HEALTH`: ZeroSlot endpoints
+    ```bash
+    python3 python/unified_monitor.py
+    ```
 
-- Wallet
-  - `PRIVATE_KEY`: base58-encoded keypair string
-  - `WRAP_AMOUNT`: SOL amount for `--wrap`
+    The monitor will start discovering new tokens and will write them to the `token_queue.json` file.
 
-Example `.env` snippet:
+2.  **Run the Rust bot:**
 
-```env
-RPC_HTTP=https://rpc.shyft.to?api_key=YOUR_API_KEY
-YELLOWSTONE_GRPC_HTTP=https://grpc.ny.shyft.to
-YELLOWSTONE_GRPC_TOKEN=YOUR_GRPC_TOKEN
-PRIVATE_KEY=YOUR_BASE58_PRIVATE_KEY
+    ```bash
+    cargo run --release
+    ```
 
-COPY_TRADING_TARGET_ADDRESS=ADDRESS1,ADDRESS2
-IS_MULTI_COPY_TRADING=true
-EXCLUDED_ADDRESSES=675kPX9MHTj...,CPMMoo8L3F...
+    The bot will start monitoring the `token_queue.json` file and will execute trades for the tokens that appear in the queue.
 
-TOKEN_AMOUNT=0.001
-SLIPPAGE=3000
-TRANSACTION_LANDING_SERVICE=zeroslot
-SELLING_UNIT_PRICE=4000000
-SELLING_UNIT_LIMIT=2000000
-ZERO_SLOT_TIP_VALUE=0.0025
+### Shell Scripts
 
-TAKE_PROFIT=8.0
-STOP_LOSS=-2
-MAX_HOLD_TIME=3600
-DYNAMIC_TRAILING_STOP_THRESHOLDS=20:5,50:10,100:30,200:100,500:100,1000:100
-```
+The `scripts` directory contains a set of useful shell scripts for managing the system:
 
----
+-   `run_monitor.sh`: A simple script to run the Python monitor.
+-   `monitor_forever.sh`: A script that runs the Python monitor in a loop and automatically restarts it if it crashes.
+-   `setup_autostart.sh`: A script that sets up a cron job to automatically start the monitor on system boot.
+-   `install_service.sh`: A script to install the monitor as a systemd service.
 
-### Notes
+### Disclaimer
 
-- PumpSwap is configured as notification-only by default. Extend `dex/pump_swap.rs` to enable execution.
-- Ensure your `PRIVATE_KEY` is a base58 string of sufficient length; the app validates it at startup.
-- If `SLIPPAGE` exceeds 10000 (100%), it is capped.
-
----
-
-### License
-
-For personal/educational use. Review and comply with your jurisdiction and exchange/DEX terms.
+This software is for educational purposes only. Use it at your own risk. The author is not responsible for any financial losses.

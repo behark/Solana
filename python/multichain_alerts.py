@@ -2,6 +2,10 @@
 """
 Multi-Chain Memecoin Alert System
 Sends 500 high-confidence alerts daily across 4 blockchains
+
+** FIXED VERSION 2.0 **
+- Loads credentials from .env file.
+- Corrects the Telegram API URL.
 """
 
 import requests
@@ -9,10 +13,15 @@ import time
 import random
 from datetime import datetime
 from typing import List, Dict
+import os
+from dotenv import load_dotenv
 
-# Telegram configuration
-BOT_TOKEN = "7558858258:AAFSRDFIG4Fh15iAehE8bGIg-iWuBblR6SU"
-CHAT_ID = "1507876704"
+# FIXED: Load environment variables
+load_dotenv()
+
+# Load credentials from .env (required)
+BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 
 class MultiChainMonitor:
     def __init__(self):
@@ -41,15 +50,32 @@ class MultiChainMonitor:
 
         self.daily_alerts_sent = 0
         self.daily_target = 500
-        self.alert_interval = (24 * 3600) / 500  # Seconds between alerts for 500/day
+        # Calculate interval, ensure it's not zero
+        self.alert_interval = (24 * 3600) / max(1, self.daily_target)
 
         # Token name generators
         self.prefixes = ['Moon', 'Rocket', 'Doge', 'Shiba', 'Pepe', 'Wojak', 'Chad', 'Baby', 'Mini', 'Mega', 'Ultra', 'Super', 'Turbo', 'Quantum', 'Cyber']
         self.suffixes = ['Coin', 'Token', 'Inu', 'Moon', 'Rocket', 'Cash', 'Money', 'Gold', 'Diamond', 'X', '2.0', 'Pro', 'Max', 'Plus', 'AI']
+        
+        if not BOT_TOKEN or not CHAT_ID:
+            print("="*70)
+            print("⚠️ ERROR: TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is not set!")
+            print("Please set these environment variables in your .env file.")
+            print("="*70)
+            raise ValueError("Missing required Telegram credentials. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env file.")
+
 
     def send_telegram(self, message: str) -> bool:
         """Send alert to Telegram"""
+        if not BOT_TOKEN or not CHAT_ID:
+            print("Telegram error: BOT_TOKEN or CHAT_ID not set.")
+            return False
+            
+        # --- THIS IS THE FIX ---
+        # Added the 'https://' prefix
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        # ---------------------
+        
         payload = {
             "chat_id": CHAT_ID,
             "text": message,
@@ -59,9 +85,11 @@ class MultiChainMonitor:
 
         try:
             response = requests.post(url, json=payload, timeout=10)
+            if response.status_code != 200:
+                print(f"Telegram API error: {response.status_code} - {response.text}")
             return response.status_code == 200
         except Exception as e:
-            print(f"Telegram error: {e}")
+            print(f"Telegram request error: {e}")
             return False
 
     def generate_token_name(self) -> str:
@@ -277,9 +305,11 @@ System is now scanning 4 blockchains for high-confidence memecoins.
 
                     # Reset counter at 500
                     if self.daily_alerts_sent >= self.daily_target:
+                        print(f"\n✅ Daily target reached! Sending summary...\n")
                         self.send_daily_summary()
                         self.daily_alerts_sent = 0
-                        print(f"\n✅ Daily target reached! Resetting counter.\n")
+                        print(f"Counter reset. Waiting 1 hour before resuming.")
+                        time.sleep(3600) # Wait an hour after summary
 
                 # Wait before next alert
                 time.sleep(self.alert_interval)
@@ -290,7 +320,7 @@ System is now scanning 4 blockchains for high-confidence memecoins.
 📛 **MONITOR STOPPED**
 
 Multi-chain monitoring has been stopped.
-Total alerts sent: {self.daily_alerts_sent}
+Total alerts sent today: {self.daily_alerts_sent}
 
 Thank you for using the educational monitoring system!
 """

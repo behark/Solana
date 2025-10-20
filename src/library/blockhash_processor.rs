@@ -32,7 +32,7 @@ impl BlockhashProcessor {
         })
     }
 
-    pub async fn start(&self) -> Result<()> {
+    pub async fn start(&self, cancel_token: CancellationToken) -> tokio::task::JoinHandle<()> {
         self.logger.log("Starting blockhash processor...".green().to_string());
 
         // Clone necessary components for the background task
@@ -41,7 +41,13 @@ impl BlockhashProcessor {
 
         tokio::spawn(async move {
             loop {
-                match Self::update_blockhash_from_rpc(&rpc_client).await {
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {
+                        logger.log("Blockhash processor received shutdown signal.".yellow().to_string());
+                        break;
+                    }
+                    _ = tokio::time::sleep(UPDATE_INTERVAL) => {
+                        match Self::update_blockhash_from_rpc(&rpc_client).await {
                     Ok(blockhash) => {
                         // Update global blockhash
                         let mut latest = LATEST_BLOCKHASH.write().await;
@@ -57,12 +63,10 @@ impl BlockhashProcessor {
                         logger.log(format!("Error getting latest blockhash: {}", e).red().to_string());
                     }
                 }
-
-                tokio::time::sleep(UPDATE_INTERVAL).await;
-            }
-        });
-
-        Ok(())
+                    }
+                }
+            logger.log("Blockhash processor shut down.".yellow().to_string());
+        })
     }
 
     async fn update_blockhash_from_rpc(rpc_client: &RpcClient) -> Result<Hash> {

@@ -20,15 +20,23 @@ impl CacheMaintenanceService {
     }
     
     /// Start the cache maintenance service
-    pub async fn start(self) {
+    pub async fn start(self, cancel_token: CancellationToken) {
         self.logger.log("Starting cache maintenance service".to_string());
         
         let mut interval = time::interval(self.cleanup_interval);
         
         loop {
-            interval.tick().await;
-            self.cleanup_expired_entries().await;
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    self.logger.log("Cache maintenance service received shutdown signal.".yellow().to_string());
+                    break;
+                }
+                _ = interval.tick() => {
+                    self.cleanup_expired_entries().await;
+                }
+            }
         }
+        self.logger.log("Cache maintenance service shut down.".yellow().to_string());
     }
     
     /// Clean up expired cache entries
@@ -55,11 +63,11 @@ impl CacheMaintenanceService {
 }
 
 /// Start the cache maintenance service in a background task
-pub async fn start_cache_maintenance(cleanup_interval_seconds: u64) {
+pub async fn start_cache_maintenance(cleanup_interval_seconds: u64, cancel_token: CancellationToken) -> tokio::task::JoinHandle<()> {
     let service = CacheMaintenanceService::new(cleanup_interval_seconds);
     
     // Spawn a background task for cache maintenance
     tokio::spawn(async move {
-        service.start().await;
-    });
+        service.start(cancel_token).await;
+    })
 } 

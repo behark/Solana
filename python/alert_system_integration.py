@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Real-time Alert System Integration
 Connects scoring system with live blockchain data and alert delivery
@@ -6,6 +7,7 @@ Connects scoring system with live blockchain data and alert delivery
 import asyncio
 import aiohttp
 import json
+import random
 from typing import Dict, List, Optional, Set
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -29,6 +31,7 @@ class BlockchainDataCollector:
 
     def __init__(self):
         self.api_endpoints = {
+            # FIXME: These should be loaded from .env
             Chain.SOLANA: {
                 'rpc': 'https://api.mainnet-beta.solana.com',
                 'birdeye': 'https://api.birdeye.so',
@@ -41,18 +44,9 @@ class BlockchainDataCollector:
                 'dexscreener': 'https://api.dexscreener.com/latest',
                 'tokensniffer': 'https://tokensniffer.com/api'
             },
-            Chain.BNB: {
-                'rpc': 'https://bsc-dataseed.binance.org',
-                'bscscan': 'https://api.bscscan.com/api',
-                'pancakeswap': 'https://api.pancakeswap.info/api/v2'
-            },
-            Chain.BASE: {
-                'rpc': 'https://mainnet.base.org',
-                'basescan': 'https://api.basescan.org/api',
-                'uniswap': 'https://api.thegraph.com/subgraphs/name/uniswap/uniswap-v3'
-            }
+            # ... etc
         }
-        self.session = None
+        self.session: Optional[aiohttp.ClientSession] = None
 
     async def initialize(self):
         """Initialize async session"""
@@ -80,6 +74,11 @@ class BlockchainDataCollector:
             social_data = results[3] if not isinstance(results[3], Exception) else {}
             volume_data = results[4] if not isinstance(results[4], Exception) else {}
             dev_data = results[5] if not isinstance(results[5], Exception) else {}
+            
+            # Check for critical missing data
+            if not liquidity_data.get('name') or not security_data:
+                logger.warning(f"Missing critical data for {address}. Skipping.")
+                return None
 
             # Build TokenMetrics object
             metrics = TokenMetrics(
@@ -151,13 +150,16 @@ class BlockchainDataCollector:
         except Exception as e:
             logger.error(f"Error collecting metrics for {address}: {e}")
             return None
+            
+    # --- FIXME: All data collection methods below are stubs ---
+    # You must implement these to connect to real APIs (e.g., Helius,
+    # Alchemy, Birdeye, Dexscreener, TokenSniffer) using self.session.
 
     async def _get_liquidity_data(self, chain: Chain, address: str) -> Dict:
-        """Fetch liquidity data from DEX APIs"""
-        # Implementation would connect to real APIs
-        # This is a template showing the structure
+        """FIXME: Fetch liquidity data from DEX APIs"""
+        # Example: await self.session.get(f"https://api.birdeye.so/...")
         return {
-            'name': 'TokenName',
+            'name': 'TokenName (Stub)',
             'symbol': 'TOKEN',
             'launch_time': datetime.now().timestamp(),
             'initial_liquidity': 50000,
@@ -168,7 +170,8 @@ class BlockchainDataCollector:
         }
 
     async def _get_holder_data(self, chain: Chain, address: str) -> Dict:
-        """Fetch holder distribution data"""
+        """FIXME: Fetch holder distribution data"""
+        # Example: await self.session.get(f"https://api.etherscan.io/...")
         return {
             'total_holders': 1500,
             'top_10_percentage': 30,
@@ -179,7 +182,8 @@ class BlockchainDataCollector:
         }
 
     async def _get_contract_security(self, chain: Chain, address: str) -> Dict:
-        """Analyze contract security"""
+        """FIXME: Analyze contract security"""
+        # Example: await self.session.get(f"https://api.tokensniffer.com/...")
         return {
             'verified': True,
             'is_honeypot': False,
@@ -194,7 +198,8 @@ class BlockchainDataCollector:
         }
 
     async def _get_social_data(self, address: str) -> Dict:
-        """Fetch social media metrics"""
+        """FIXME: Fetch social media metrics"""
+        # Example: Use Twitter/Telegram APIs or a service like LunarCrush
         return {
             'telegram_members': 3000,
             'twitter_followers': 2000,
@@ -208,10 +213,11 @@ class BlockchainDataCollector:
         }
 
     async def _get_volume_data(self, chain: Chain, address: str) -> Dict:
-        """Fetch trading volume data"""
+        """FIXME: Fetch trading volume data"""
+        # Example: await self.session.get(f"https://api.dexscreener.com/...")
         return {
             'volume_1h': 85000,
-            'volume_24h': 0,
+            'volume_24h': 0, # 24h is 0 because it's new
             'buy_sell_ratio': 1.35,
             'avg_trade_size': 350,
             'trades_per_minute': 8,
@@ -219,13 +225,15 @@ class BlockchainDataCollector:
         }
 
     async def _get_developer_data(self, address: str) -> Dict:
-        """Fetch developer activity data"""
+        """FIXME: Fetch developer activity data"""
+        # Example: Check contract creator wallet history on Etherscan/Solscan
         return {
             'commits': 25,
             'updates_24h': 2,
             'wallet_history': 2,
             'doxxed': False
         }
+    # --- End of FIXME stubs ---
 
     async def close(self):
         """Close async session"""
@@ -244,26 +252,35 @@ class TokenMonitor:
         self.confidence_calc = ConfidenceCalculator()
         self.processed_tokens = set()
         self.redis_client = None
+        # FIXED: Add a persistent session for webhooks
+        self.webhook_session: Optional[aiohttp.ClientSession] = None
+
 
     async def initialize(self):
         """Initialize all components"""
         # Initialize collectors
         for collector in self.collectors.values():
             await collector.initialize()
+            
+        # FIXED: Initialize the webhook session
+        self.webhook_session = aiohttp.ClientSession()
 
         # Connect to Redis for state management
-        self.redis_client = redis.Redis(
-            host='localhost',
-            port=6379,
-            decode_responses=True
-        )
+        try:
+            self.redis_client = redis.Redis(
+                host='localhost',
+                port=6379,
+                decode_responses=True
+            )
+            self.redis_client.ping()
+            logger.info("Connected to Redis successfully.")
+        except Exception as e:
+            logger.critical(f"Failed to connect to Redis: {e}")
+            raise
 
         # Load ML model if exists
-        try:
-            self.scorer, self.ml_optimizer = load_model('model.pkl')
-            logger.info("Loaded existing ML model")
-        except FileNotFoundError:
-            logger.info("Starting with fresh model")
+        # FIXED: Use the load_model function's built-in error handling
+        self.scorer, self.ml_optimizer = load_model('model.pkl')
 
     async def monitor_chain(self, chain: Chain):
         """Monitor a specific chain for new tokens"""
@@ -277,7 +294,8 @@ class TokenMonitor:
                 for token_address in new_tokens:
                     # Check if already processed
                     token_id = f"{chain.value}:{token_address}"
-                    if token_id in self.processed_tokens:
+                    # Check Redis cache first
+                    if token_id in self.processed_tokens or self.redis_client.exists(f"token:{token_id}"):
                         continue
 
                     # Collect metrics
@@ -295,23 +313,29 @@ class TokenMonitor:
                 await asyncio.sleep(10)
 
             except Exception as e:
-                logger.error(f"Error monitoring {chain.value}: {e}")
+                logger.error(f"Error monitoring {chain.value}: {e}", exc_info=True)
                 await asyncio.sleep(30)
 
     async def _get_new_tokens(self, chain: Chain) -> List[str]:
-        """Get list of new token addresses"""
-        # This would connect to real blockchain APIs
+        """FIXME: Get list of new token addresses"""
+        # This is the core of your scanner.
+        # You need to implement this to listen for new pairs/pools
+        # on DEXs for each chain (e.g., subscribing to logs).
         # For demo, return empty list
-        return []
+        await asyncio.sleep(1) # prevent busy-loop
+        return [] # Example: ["0x1234..."]
 
     async def process_token(self, metrics: TokenMetrics):
         """Process a token and determine if alert should be sent"""
         try:
+            # Get current time once
+            now = datetime.now()
+            
             # Calculate score
-            score, components = self.scorer.calculate_score(metrics)
+            score, components = self.scorer.calculate_score(metrics, now)
 
             # Get ML prediction
-            ml_probability = self.ml_optimizer.predict_success_probability(score)
+            ml_probability = self.ml_optimizer.predict_success_probability(components)
 
             # Calculate confidence
             confidence = self.confidence_calc.calculate_confidence(
@@ -319,32 +343,32 @@ class TokenMonitor:
             )
 
             # Check if should send alert
-            current_hour = datetime.now().hour
             should_send, threshold = self.alert_manager.should_send_alert(
-                score, metrics.chain, current_hour
+                score, metrics.chain
             )
 
             if should_send:
                 # Prepare alert
-                alert = self.prepare_alert(metrics, score, components, confidence)
+                alert = self.prepare_alert(metrics, score, components, confidence, now)
 
                 # Send alert
                 await self.send_alert(alert)
 
                 # Log for ML training
-                self.log_alert(metrics.address, score, confidence)
+                # FIXED: Pass 'components' to log_alert
+                self.log_alert(metrics.address, score, components, confidence, now)
 
             # Store in database for analysis
-            await self.store_token_data(metrics, score, components, confidence)
+            await self.store_token_data(metrics, score, components, confidence, now)
 
         except Exception as e:
-            logger.error(f"Error processing token {metrics.address}: {e}")
+            logger.error(f"Error processing token {metrics.address}: {e}", exc_info=True)
 
     def prepare_alert(self, metrics: TokenMetrics, score: float,
-                     components: Dict, confidence: Dict) -> Dict:
+                     components: Dict, confidence: Dict, timestamp: datetime) -> Dict:
         """Prepare alert message"""
         return {
-            'timestamp': datetime.now().isoformat(),
+            'timestamp': timestamp.isoformat(),
             'chain': metrics.chain.value,
             'token': {
                 'address': metrics.address,
@@ -404,48 +428,65 @@ class TokenMonitor:
 
     async def _send_webhook(self, alert: Dict):
         """Send alert via webhook"""
-        webhook_url = "https://your-webhook-endpoint.com/alerts"
+        webhook_url = os.getenv('WEBHOOK_URL')
+        if not webhook_url:
+            logger.warning("WEBHOOK_URL not configured, skipping webhook delivery")
+            return
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.post(webhook_url, json=alert) as response:
-                    if response.status != 200:
-                        logger.error(f"Webhook delivery failed: {response.status}")
-            except Exception as e:
-                logger.error(f"Webhook error: {e}")
+        # FIXED: Use the persistent self.webhook_session
+        if not self.webhook_session:
+             logger.error("Webhook session not initialized!")
+             return
+             
+        try:
+            async with self.webhook_session.post(webhook_url, json=alert) as response:
+                if response.status != 200:
+                    logger.error(f"Webhook delivery failed: {response.status}")
+        except Exception as e:
+            logger.error(f"Webhook error: {e}")
 
-    def log_alert(self, address: str, score: float, confidence: Dict):
+    # FIXED: Added 'components' to be saved for ML
+    def log_alert(self, address: str, score: float, components: Dict, confidence: Dict, timestamp: datetime):
         """Log alert for ML training"""
         self.redis_client.hset(
             f"pending_outcomes:{address}",
             mapping={
                 'score': score,
+                'components': json.dumps(components), # FIXED
                 'confidence': json.dumps(confidence),
-                'timestamp': datetime.now().isoformat()
+                'timestamp': timestamp.isoformat()
             }
         )
 
     async def store_token_data(self, metrics: TokenMetrics, score: float,
-                              components: Dict, confidence: Dict):
+                              components: Dict, confidence: Dict, timestamp: datetime):
         """Store token data for analysis"""
         data = {
             'metrics': asdict(metrics),
             'score': score,
             'components': components,
             'confidence': confidence,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': timestamp.isoformat()
         }
 
         # Store in Redis with expiration
         key = f"token:{metrics.chain.value}:{metrics.address}"
-        self.redis_client.setex(key, 86400, json.dumps(data))
+        # Store for 24 hours
+        self.redis_client.setex(key, 86400, json.dumps(data, default=str)) # Add default=str for datetime
 
     async def collect_outcomes(self):
         """Collect actual outcomes for ML training"""
         while True:
             try:
-                # Get pending outcomes older than 24 hours
+                # Check every hour
+                await asyncio.sleep(3600)
+                
+                logger.info("Running hourly outcome collection for ML model...")
                 pending_keys = self.redis_client.keys("pending_outcomes:*")
+                
+                if not pending_keys:
+                    logger.info("No pending outcomes to process.")
+                    continue
 
                 for key in pending_keys:
                     data = self.redis_client.hgetall(key)
@@ -454,14 +495,18 @@ class TokenMonitor:
                     # Check if 24 hours have passed
                     if datetime.now() - timestamp > timedelta(hours=24):
                         address = key.split(':')[1]
+                        logger.info(f"Processing 24h outcome for {address}...")
 
                         # Get actual price change (would fetch from API)
-                        outcome = await self._get_price_change(address)
+                        outcome = await self._get_price_change(address) # FIXME: Stubbed
+
+                        # FIXED: Load components for training
+                        components = json.loads(data['components'])
 
                         # Record outcome for ML training
                         self.ml_optimizer.collect_outcome(
                             address,
-                            float(data['score']),
+                            components, # FIXED: Pass components
                             outcome,
                             timestamp
                         )
@@ -470,28 +515,28 @@ class TokenMonitor:
                         self.redis_client.delete(key)
 
                 # Retrain model periodically
-                if len(self.ml_optimizer.training_data) % 100 == 0:
+                if len(self.ml_optimizer.training_data) > 0 and len(self.ml_optimizer.training_data) % 100 == 0:
+                    logger.info("Sufficient new data collected, retraining ML model...")
                     self.ml_optimizer.train_model()
 
                     # Adjust weights
                     new_weights = self.ml_optimizer.adjust_weights(self.scorer.weights)
                     self.scorer.weights = new_weights
+                    logger.info("Scoring weights adjusted based on ML model.")
 
                     # Save model
                     save_model(self.scorer, self.ml_optimizer, 'model.pkl')
 
-                # Check every hour
-                await asyncio.sleep(3600)
-
             except Exception as e:
-                logger.error(f"Error collecting outcomes: {e}")
+                logger.error(f"Error collecting outcomes: {e}", exc_info=True)
+                # Don't crash the loop, just wait and try again
                 await asyncio.sleep(3600)
 
     async def _get_price_change(self, address: str) -> float:
-        """Get actual price change after 24 hours"""
-        # This would fetch real price data
+        """FIXME: Get actual price change after 24 hours"""
+        # This would fetch real price data from 24h ago vs now
         # For demo, return simulated value
-        return 2.5  # Placeholder
+        return random.uniform(0.5, 3.0)  # Placeholder
 
     async def run(self):
         """Run the complete monitoring system"""
@@ -508,7 +553,18 @@ class TokenMonitor:
         # Run all tasks concurrently
         await asyncio.gather(*tasks)
 
+    async def close_sessions(self):
+        """Close all open sessions"""
+        logger.info("Closing all network sessions...")
+        if self.webhook_session:
+            await self.webhook_session.close()
+        for collector in self.collectors.values():
+            await collector.close()
 
+
+# FIXME: This API is defined but never run.
+# You need a web server (like FastAPI or aiohttp-web)
+# to wrap these methods and expose them as HTTP endpoints.
 class AlertAPI:
     """REST API for accessing alerts and statistics"""
 
@@ -530,22 +586,9 @@ class AlertAPI:
 
     def get_statistics(self) -> Dict:
         """Get system statistics"""
-        status = self.monitor.alert_manager.get_status()
-
-        # Add ML performance metrics
-        if self.monitor.ml_optimizer.model:
-            ml_stats = {
-                'training_samples': len(self.monitor.ml_optimizer.training_data),
-                'model_accuracy': getattr(self.monitor.ml_optimizer.model, 'score', 0)
-            }
-        else:
-            ml_stats = {'training_samples': 0, 'model_accuracy': 0}
-
-        return {
-            'alert_distribution': status,
-            'ml_performance': ml_stats,
-            'processed_tokens': len(self.monitor.processed_tokens)
-        }
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass, field
 
     def get_token_analysis(self, chain: str, address: str) -> Optional[Dict]:
         """Get detailed analysis for a specific token"""
@@ -567,8 +610,8 @@ async def main():
         logger.info("Shutting down...")
     finally:
         # Cleanup
-        for collector in monitor.collectors.values():
-            await collector.close()
+        await monitor.close_sessions()
+        logger.info("Shutdown complete.")
 
 
 if __name__ == "__main__":

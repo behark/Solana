@@ -2,6 +2,10 @@
 """
 Launch Multi-Chain Memecoin Monitor
 Main entry point for the educational monitoring system
+
+** FIXED VERSION **
+- Replaced blocking 'requests' with 'aiohttp' for true async performance.
+- Uses a shared aiohttp.ClientSession for efficiency.
 """
 
 import os
@@ -9,8 +13,9 @@ import sys
 import asyncio
 import time
 from datetime import datetime
-import requests
+import aiohttp  # FIXED: Import aiohttp
 from dotenv import load_dotenv
+import random # FIXED: Import random
 
 # Load environment variables
 load_dotenv()
@@ -25,13 +30,14 @@ ETHEREUM_RPC = os.getenv('ETHEREUM_RPC_HTTP', '')
 BNB_RPC = os.getenv('BNB_RPC_HTTP', '')
 BASE_RPC = os.getenv('BASE_RPC_HTTP', '')
 
-def send_telegram(message: str) -> bool:
-    """Send a message via Telegram"""
+# FIXED: Re-wrote send_telegram to be async with aiohttp
+async def send_telegram(session: aiohttp.ClientSession, message: str) -> bool:
+    """Send a message via Telegram asynchronously"""
     if not BOT_TOKEN or not CHAT_ID:
         print("⚠️ Telegram not configured")
         return False
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    url = f"https.api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": CHAT_ID,
         "text": message,
@@ -39,8 +45,9 @@ def send_telegram(message: str) -> bool:
     }
 
     try:
-        response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
+        # Use the provided session to make an async POST request
+        async with session.post(url, json=payload, timeout=10) as response:
+            return response.status == 200
     except Exception as e:
         print(f"Error sending Telegram: {e}")
         return False
@@ -60,30 +67,31 @@ def check_configuration():
         config_ok = False
 
     # Check RPC endpoints
-    if SOLANA_RPC and 'helius' in SOLANA_RPC:
-        print("✅ Solana RPC: Configured (Helius)")
+    if SOLANA_RPC:
+        print(f"✅ Solana RPC: Configured ({'Helius' if 'helius' in SOLANA_RPC else 'Custom'})")
     else:
-        print("⚠️ Solana RPC: Using default")
+        print("⚠️ Solana RPC: Not configured, Solana monitor disabled.")
 
-    if ETHEREUM_RPC and 'alchemy' in ETHEREUM_RPC:
-        print("✅ Ethereum RPC: Configured (Alchemy)")
+    if ETHEREUM_RPC:
+        print(f"✅ Ethereum RPC: Configured ({'Alchemy' if 'alchemy' in ETHEREUM_RPC else 'Custom'})")
     else:
-        print("⚠️ Ethereum RPC: Using default")
+        print("⚠️ Ethereum RPC: Not configured, Ethereum monitor disabled.")
 
-    if BNB_RPC and 'alchemy' in BNB_RPC:
-        print("✅ BNB Chain RPC: Configured (Alchemy)")
+    if BNB_RPC:
+        print(f"✅ BNB Chain RPC: Configured ({'Alchemy' if 'alchemy' in BNB_RPC else 'Custom'})")
     else:
-        print("⚠️ BNB RPC: Using default")
+        print("⚠️ BNB RPC: Not configured, BNB monitor disabled.")
 
-    if BASE_RPC and 'alchemy' in BASE_RPC:
-        print("✅ Base RPC: Configured (Alchemy)")
+    if BASE_RPC:
+        print(f"✅ Base RPC: Configured ({'Alchemy' if 'alchemy' in BASE_RPC else 'Custom'})")
     else:
-        print("⚠️ Base RPC: Using default")
+        print("⚠️ Base RPC: Not configured, Base monitor disabled.")
 
     print("-" * 60)
     return config_ok
 
-async def monitor_chain(chain_name: str, rpc_url: str):
+# FIXED: Function now accepts the aiohttp session
+async def monitor_chain(session: aiohttp.ClientSession, chain_name: str, rpc_url: str):
     """Monitor a single chain (simulated for educational demo)"""
     print(f"🔗 Starting {chain_name} monitor...")
 
@@ -94,7 +102,6 @@ async def monitor_chain(chain_name: str, rpc_url: str):
     while True:
         try:
             # Simulate token discovery
-            import random
             if random.random() < 0.1:  # 10% chance per cycle
                 token_count += 1
 
@@ -130,7 +137,8 @@ async def monitor_chain(chain_name: str, rpc_url: str):
 """
 
                     # Send to Telegram
-                    send_telegram(alert)
+                    # FIXED: Use 'await' and pass the session
+                    await send_telegram(session, alert)
                     print(f"  ✉️ Alert sent for {chain_name} (Score: {score})")
 
             await asyncio.sleep(30)  # Check every 30 seconds
@@ -162,8 +170,10 @@ async def main():
     print("-" * 60)
     print()
 
-    # Send startup notification
-    startup_msg = f"""
+    # FIXED: Create a single aiohttp session for the application
+    async with aiohttp.ClientSession() as session:
+        # Send startup notification
+        startup_msg = f"""
 🚀 **MULTI-CHAIN MONITOR STARTED**
 
 ⚡ **System Active**
@@ -188,51 +198,52 @@ async def main():
 ⚠️ **Remember**: This is for educational purposes only!
 """
 
-    if send_telegram(startup_msg):
-        print("✅ Startup notification sent to Telegram")
-    else:
-        print("⚠️ Could not send Telegram notification")
+        if await send_telegram(session, startup_msg):
+            print("✅ Startup notification sent to Telegram")
+        else:
+            print("⚠️ Could not send Telegram notification")
 
-    print()
-    print("🚀 Starting chain monitors...")
-    print("-" * 60)
+        print()
+        print("🚀 Starting chain monitors...")
+        print("-" * 60)
 
-    # Create monitoring tasks for each chain
-    tasks = []
+        # Create monitoring tasks for each chain
+        tasks = []
 
-    # Only start monitors if RPC is configured
-    if SOLANA_RPC:
-        tasks.append(asyncio.create_task(monitor_chain("Solana", SOLANA_RPC)))
+        # Only start monitors if RPC is configured
+        if SOLANA_RPC:
+            # FIXED: Pass session to monitor task
+            tasks.append(asyncio.create_task(monitor_chain(session, "Solana", SOLANA_RPC)))
 
-    if ETHEREUM_RPC:
-        tasks.append(asyncio.create_task(monitor_chain("Ethereum", ETHEREUM_RPC)))
+        if ETHEREUM_RPC:
+            tasks.append(asyncio.create_task(monitor_chain(session, "Ethereum", ETHEREUM_RPC)))
 
-    if BNB_RPC:
-        tasks.append(asyncio.create_task(monitor_chain("BNB", BNB_RPC)))
+        if BNB_RPC:
+            tasks.append(asyncio.create_task(monitor_chain(session, "BNB", BNB_RPC)))
 
-    if BASE_RPC:
-        tasks.append(asyncio.create_task(monitor_chain("Base", BASE_RPC)))
+        if BASE_RPC:
+            tasks.append(asyncio.create_task(monitor_chain(session, "Base", BASE_RPC)))
 
-    if not tasks:
-        print("❌ No chains configured! Please check your .env file")
-        return
+        if not tasks:
+            print("❌ No chains configured! Please check your .env file")
+            return
 
-    print(f"✅ Started {len(tasks)} chain monitors")
-    print()
-    print("📱 Monitoring active - Alerts will be sent to Telegram")
-    print("⚠️ This is for EDUCATIONAL purposes only - NO TRADING")
-    print()
-    print("Press Ctrl+C to stop monitoring")
-    print("=" * 80)
+        print(f"✅ Started {len(tasks)} chain monitors")
+        print()
+        print("📱 Monitoring active - Alerts will be sent to Telegram")
+        print("⚠️ This is for EDUCATIONAL purposes only - NO TRADING")
+        print()
+        print("Press Ctrl+C to stop monitoring")
+        print("=" * 80)
 
-    try:
-        # Keep running until interrupted
-        await asyncio.gather(*tasks)
-    except KeyboardInterrupt:
-        print("\n\n📛 Shutdown signal received...")
+        try:
+            # Keep running until interrupted
+            await asyncio.gather(*tasks)
+        except KeyboardInterrupt:
+            print("\n\n📛 Shutdown signal received...")
 
-        # Send shutdown notification
-        shutdown_msg = f"""
+            # Send shutdown notification
+            shutdown_msg = f"""
 📛 **MONITOR STOPPED**
 
 Multi-chain monitoring has been stopped.
@@ -240,9 +251,9 @@ Thank you for using the educational monitoring system!
 
 ⏰ Stopped: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 """
-        send_telegram(shutdown_msg)
+            await send_telegram(session, shutdown_msg) # FIXED: Use await and pass session
 
-        print("✅ Monitor stopped successfully")
+            print("✅ Monitor stopped successfully")
 
 if __name__ == "__main__":
     try:

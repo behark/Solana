@@ -10,13 +10,15 @@
  */
 
 use anchor_client::solana_sdk::signature::Signer;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use solana_vntr_sniper::{
     common::{config::Config, constants::RUN_MSG, cache::WALLET_TOKEN_ACCOUNTS},
     processor::{
-        sniper_bot::{start_target_wallet_monitoring, start_dex_monitoring, SniperConfig},
+        sniper_bot::{start_token_queue_monitoring, SniperConfig},
         swap::SwapProtocol,
     },
-    library::{ 
+    library::{
         cache_maintenance, 
         blockhash_processor::BlockhashProcessor,
         jupiter_api::JupiterClient
@@ -462,19 +464,16 @@ async fn main() {
     println!("{}", run_msg);
     
     // Initialize blockhash processor
-    match BlockhashProcessor::new(config.app_state.rpc_client.clone()).await {
+    let blockhash_processor_handle = match BlockhashProcessor::new(config.app_state.rpc_client.clone()).await {
         Ok(processor) => {
-            if let Err(e) = processor.start().await {
-                eprintln!("Failed to start blockhash processor: {}", e);
-                return;
-            }
             println!("Blockhash processor started successfully");
+            Some(processor.start(cancel_token.clone()).await)
         },
         Err(e) => {
             eprintln!("Failed to initialize blockhash processor: {}", e);
-            return;
+            None
         }
-    }
+    };
 
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
@@ -545,7 +544,7 @@ async fn main() {
     initialize_token_account_list(&config).await;
     
     // Start cache maintenance service (clean up expired cache entries every 60 seconds)
-    cache_maintenance::start_cache_maintenance(60).await;
+    let cache_maintenance_handle = solana_vntr_sniper::library::cache_maintenance::start_cache_maintenance(60, cancel_token.clone()).await;
     println!("Cache maintenance service started");
     
     // Selling instruction cache removed - no maintenance needed
@@ -629,15 +628,13 @@ async fn main() {
     
     // Start risk management service
     println!("Starting risk management service...");
-    if let Err(e) = solana_vntr_sniper::processor::risk_management::start_risk_management_service(
+    let risk_management_handle = solana_vntr_sniper::processor::risk_management::start_risk_management_service(
         target_addresses.clone(),
         Arc::new(config.app_state.clone()),
         Arc::new(config.swap_config.clone()),
-    ).await {
-        eprintln!("Failed to start risk management service: {}", e);
-    } else {
-        println!("Risk management service started successfully");
-    }
+        cancel_token.clone(),
+    ).await;
+    println!("Risk management service started successfully");
 
     // Create copy trading config
     let sniper_config = SniperConfig {
@@ -651,34 +648,72 @@ async fn main() {
         protocol_preference,
     };
     
-    // Run both monitoring functions simultaneously
-    println!("🚀 Starting both monitoring systems simultaneously...");
-    
-    // Spawn both monitoring tasks to run in parallel
-    let target_monitoring_handle = tokio::spawn({
+    // Create cancellation token for graceful shutdown
+    let cancel_token = CancellationToken::new();
+
+    // Set up signal handler for graceful shutdown (Ctrl+C and SIGTERM)
+    let cancel_token_for_handler = cancel_token.clone();
+    tokio::spawn(async move {
+        #[cfg(unix)]
+        {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut sigterm = signal(SignalKind::terminate()).expect("Failed to setup SIGTERM handler");
+
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    println!("🛑 Ctrl+C received, shutting down gracefully...");
+                },
+                _ = sigterm.recv() => {
+                    println!("🛑 SIGTERM received, shutting down gracefully...");
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            if let Err(err) = tokio::signal::ctrl_c().await {
+                eprintln!("❌ Unable to listen for shutdown signal: {}", err);
+                return;
+            }
+            println!("🛑 Ctrl+C received, shutting down gracefully...");
+        }
+
+        cancel_token_for_handler.cancel();
+        println!("✅ Shutdown signal sent to all tasks");
+    });
+
+    let token_queue_monitoring_handle = tokio::spawn({
         let config = sniper_config.clone();
+        let token = cancel_token.clone();
         async move {
-            match start_target_wallet_monitoring(config).await {
-                Ok(_) => println!("✅ Target wallet monitoring completed successfully"),
-                Err(e) => eprintln!("❌ Target wallet monitoring error: {}", e),
+            match start_token_queue_monitoring(config, token).await {
+                Ok(_) => println!("✅ Token queue monitoring completed successfully"),
+                Err(e) => eprintln!("❌ Token queue monitoring error: {}", e),
             }
         }
     });
-    
-    let dex_monitoring_handle = tokio::spawn({
-        let config = sniper_config;
-        async move {
-            match start_dex_monitoring(config).await {
-                Ok(_) => println!("✅ DEX monitoring completed successfully"),
-                Err(e) => eprintln!("❌ DEX monitoring error: {}", e),
-            }
+
+    // Wait for the monitoring task to complete (or error)
+    println!("⏳ Waiting for the monitoring task to complete...");
+    match token_queue_monitoring_handle.await {
+        Ok(_) => println!("🎯 The monitoring system has completed"),
+        Err(e) => eprintln!("⚠️  The monitoring system panicked: {:?}", e),
+    }
+
+    // Await background services for graceful shutdown
+    println!("🛑 Shutting down background services...");
+    let mut handles = Vec::new();
+    if let Some(handle) = blockhash_processor_handle {
+        handles.push(handle);
+    }
+    handles.push(cache_maintenance_handle);
+    handles.push(risk_management_handle);
+
+    for handle in handles {
+        if let Err(e) = handle.await {
+            eprintln!("Error awaiting background service: {:?}", e);
         }
-    });
-    
-    // Wait for both tasks to complete (or error)
-    println!("⏳ Waiting for monitoring tasks to complete...");
-    tokio::try_join!(target_monitoring_handle, dex_monitoring_handle)
-        .map(|_| println!("🎯 Both monitoring systems have completed"))
-        .unwrap_or_else(|_| println!("⚠️  One or both monitoring systems encountered errors"));
+    }
+    println!("✅ Shutdown complete");
 
 }

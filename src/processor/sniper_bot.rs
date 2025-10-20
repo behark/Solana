@@ -1,4 +1,369 @@
+use serde::Deserialize;
+use tokio_util::sync::CancellationToken;
+use fs2::FileExt;
+use tokio::sync::mpsc;
+use dashmap::DashMap;
 use std::collections::{HashSet, VecDeque};
+#[derive(Debug, Deserialize, Clone)]
+pub struct TokenData {
+    pub address: String,
+    pub symbol: String,
+    pub name: String,
+    pub chain: String,
+    pub liquidity_usd: f64,
+    pub volume_24h: f64,
+    pub price_usd: f64,
+    pub price_change_24h: f64,
+    pub market_cap: f64,
+    pub holders: i64,
+    pub dex: String,
+    pub pair_address: String,
+    pub score: f64,
+}
+
+/// Helper function to parse DEX string to DexType enum
+/// Returns Result to prevent silent errors from unknown DEX types
+fn parse_dex_type(dex_str: &str) -> Result<DexType, String> {
+    match dex_str.to_lowercase().as_str() {
+        "pumpfun" => Ok(DexType::PumpFun),
+        "pumpswap" => Ok(DexType::PumpSwap),
+        "raydium" => Ok(DexType::RaydiumLaunchpad),
+        _ => Err(format!("Unknown DEX type: {} - Cannot proceed with trade", dex_str)),
+    }
+}
+
+/// Helper function to parse DEX string to SwapProtocol enum
+fn parse_swap_protocol(dex_str: &str) -> SwapProtocol {
+    match dex_str.to_lowercase().as_str() {
+        "pumpfun" => SwapProtocol::PumpFun,
+        "pumpswap" => SwapProtocol::PumpSwap,
+        "raydium" => SwapProtocol::RaydiumLaunchpad,
+        _ => SwapProtocol::Auto,
+    }
+}
+
+pub async fn start_token_queue_monitoring(
+    config: SniperConfig,
+    cancel_token: CancellationToken,
+) -> Result<(), String> {
+    let logger = Logger::new("[TOKEN-QUEUE-MONITOR] => ".blue().bold().to_string());
+    logger.log("Starting token queue monitoring...".to_string());
+
+    // Limit concurrent execute_buy tasks to prevent resource exhaustion
+    let concurrent_buys = Arc::new(tokio::sync::Semaphore::new(10));
+    logger.log("Concurrency limit: 10 simultaneous buy operations".to_string());
+
+    // Track processed tokens to prevent duplicates
+    // Use bounded cache to prevent unbounded memory growth
+    let mut processed_tokens = std::collections::HashSet::new();
+    const MAX_PROCESSED_TOKENS: usize = 10000; // Limit history to 10k tokens
+
+    // Create channel for buy result tracking
+    let (result_tx, mut result_rx) = mpsc::unbounded_channel::<(String, Result<(), String>)>();
+
+    // Create task tracking registry to prevent resource exhaustion
+    let task_handles: Arc<DashMap<String, tokio::task::JoinHandle<()>>> = Arc::new(DashMap::new());
+
+    // Spawn task to handle buy results - only mark successful buys as processed
+    let processed_tokens_shared = Arc::new(tokio::sync::Mutex::new(processed_tokens.clone()));
+    let processed_tokens_for_handler = processed_tokens_shared.clone();
+    tokio::spawn(async move {
+        let logger = Logger::new("[BUY-RESULT-HANDLER] => ".cyan().to_string());
+        while let Some((address, result)) = result_rx.recv().await {
+            match result {
+                Ok(_) => {
+                    processed_tokens_for_handler.lock().await.insert(address.clone());
+                    logger.log(format!("✅ Buy success for {} - marked as processed", address).green().to_string());
+                }
+                Err(e) => {
+                    logger.log(format!("❌ Buy failed for {}: {} - will retry on next iteration", address, e).yellow().to_string());
+                }
+            }
+        }
+    });
+
+    // Cleanup task for finished handles - runs every 30 seconds
+    let handles_for_cleanup = task_handles.clone();
+    let cancel_for_cleanup = cancel_token.clone();
+    tokio::spawn(async move {
+        let mut cleanup_interval = time::interval(Duration::from_secs(30));
+        loop {
+            tokio::select! {
+                _ = cancel_for_cleanup.cancelled() => break,
+                _ = cleanup_interval.tick() => {
+                    let before_count = handles_for_cleanup.len();
+                    handles_for_cleanup.retain(|_k, handle| !handle.is_finished());
+                    let after_count = handles_for_cleanup.len();
+                    if before_count != after_count {
+                        let logger = Logger::new("[TASK-CLEANUP] => ".magenta().to_string());
+                        logger.log(format!("Cleaned up {} finished tasks ({} -> {})",
+                            before_count - after_count, before_count, after_count));
+                    }
+                }
+            }
+        }
+    });
+
+    let mut interval = time::interval(Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                logger.log("Token queue monitoring cancelled - shutting down gracefully".yellow().to_string());
+                break;
+            }
+            _ = interval.tick() => {}
+        }
+
+        // File locking implementation to prevent concurrent access races
+        // For production, consider Redis/PostgreSQL/RabbitMQ for better reliability
+        let file = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open("token_queue.json") {
+            Ok(f) => f,
+            Err(e) => {
+                logger.log(format!("Failed to open token_queue.json: {}", e).red().to_string());
+                continue;
+            }
+        };
+
+        // Acquire exclusive lock (blocks until available)
+        if let Err(e) = file.lock_exclusive() {
+            logger.log(format!("Failed to acquire file lock: {}", e).red().to_string());
+            continue;
+        }
+
+        // Read file content from the locked handle
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let content_result = (|| -> Result<String, std::io::Error> {
+            let mut buf = String::new();
+            let mut file_ref = &file;
+            file_ref.seek(SeekFrom::Start(0))?;
+            file_ref.read_to_string(&mut buf)?;
+            Ok(buf)
+        })();
+
+        match content_result {
+            Ok(content) => {
+                if content.trim().is_empty() {
+                    let _ = file.unlock();
+                    continue;
+                }
+
+                let lines: Vec<&str> = content.trim().split('\n').collect();
+                let mut processed_lines = 0;
+                let mut failed_lines = Vec::new();
+
+                for line in lines {
+                    match serde_json::from_str::<TokenData>(line) {
+                        Ok(token_data) => {
+                            // Check if token already processed to prevent duplicates
+                            if processed_tokens_shared.lock().await.contains(&token_data.address) {
+                                logger.log(format!("Token {} already processed, skipping", token_data.address).yellow().to_string());
+                                processed_lines += 1; // Count as processed to clear from queue
+                                continue;
+                            }
+
+                            logger.log(format!("Processing token: {}", token_data.symbol));
+
+                            // Map DEX type from token data using helper function
+                            let dex_type = match parse_dex_type(&token_data.dex) {
+                                Ok(dex) => dex,
+                                Err(e) => {
+                                    logger.log(format!("{} - skipping token", e).red().to_string());
+                                    failed_lines.push(line);
+                                    continue;
+                                }
+                            };
+
+                            // Get current timestamp in seconds
+                            let current_time = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+
+                            // Fetch token decimals from on-chain
+                            // Critical for accurate pricing: 6-decimal tokens with 9-decimal assumption = 1000x error!
+                            let decimals = {
+                                use solana_sdk::pubkey::Pubkey;
+                                use std::str::FromStr;
+
+                                match Pubkey::from_str(&token_data.address) {
+                                    Ok(token_mint_pubkey) => {
+                                        // Try to fetch mint account from on-chain
+                                        match config.app_state.rpc_nonblocking_client.get_account(&token_mint_pubkey).await {
+                                            Ok(account) => {
+                                                // SPL Token Mint account: decimals is at offset 44
+                                                if account.data.len() >= 45 {
+                                                    let decimals = account.data[44] as u32;
+                                                    logger.log(format!("✅ Fetched decimals={} from on-chain for token {}",
+                                                        decimals, token_data.address).green().to_string());
+                                                    decimals
+                                                } else {
+                                                    logger.log(format!("⚠️  Invalid mint data length {}, using default decimals=9",
+                                                        account.data.len()).yellow().to_string());
+                                                    9u32
+                                                }
+                                            }
+                                            Err(e) => {
+                                                logger.log(format!("⚠️  Failed to fetch mint account: {}, using default decimals=9", e).yellow().to_string());
+                                                9u32
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        logger.log(format!("⚠️  Invalid token address {}: {}, using default decimals=9",
+                                            token_data.address, e).red().to_string());
+                                        9u32
+                                    }
+                                }
+                            };
+
+                            // Calculate price with checked arithmetic and precision handling
+                            let price_raw = token_data.price_usd * 10u64.pow(decimals) as f64;
+
+                            // Handle edge cases: NaN, negative, overflow, precision loss
+                            let price_lamports = if price_raw.is_nan() {
+                                logger.log(format!("⚠️  ERROR: NaN price for token {}, using 0", token_data.address).red().to_string());
+                                0u64
+                            } else if price_raw < 0.0 {
+                                logger.log(format!("⚠️  ERROR: Negative price {} for token {}, using 0",
+                                    price_raw, token_data.address).red().to_string());
+                                0u64
+                            } else if price_raw >= u64::MAX as f64 {
+                                logger.log(format!("⚠️  ERROR: Price {} exceeds u64::MAX for token {}, clamping to MAX",
+                                    price_raw, token_data.address).red().to_string());
+                                u64::MAX
+                            } else if price_raw < 1.0 && price_raw > 0.0 {
+                                logger.log(format!("⚠️  WARNING: Very small price {} for token {} may lose precision",
+                                    price_raw, token_data.address).yellow().to_string());
+                                price_raw.round() as u64 // Round to nearest integer
+                            } else {
+                                price_raw.round() as u64 // Use rounding for deterministic conversion
+                            };
+
+                            // QUEUE-BASED TRADE CONSTRUCTION
+                            // This TradeInfo is created from queue data, not blockchain transactions
+                            // Sentinel/placeholder values are used where blockchain data is unavailable:
+                            // - slot: u64::MAX (not a real blockchain slot)
+                            // - signature: "queue:..." prefix (synthetic, not a real tx signature)
+                            // - coin_creator: empty (not available in TokenData API response)
+                            // - sol_change/token_change: 0.0 (only applicable for observed trades)
+                            // - virtual_*_reserves: 0 (would need separate DEX pool query)
+                            //
+                            // Downstream code MUST handle these sentinel values appropriately
+                            let trade_info = transaction_parser::TradeInfoFromToken {
+                                dex_type,
+                                slot: u64::MAX, // Sentinel: queue-based trade, not from blockchain
+                                signature: format!("queue:{}:{}", token_data.address, current_time), // Synthetic signature
+                                pool_id: token_data.pair_address.clone(),
+                                mint: token_data.address.clone(),
+                                timestamp: current_time,
+                                is_buy: true,
+                                price: price_lamports,
+                                is_reverse_when_pump_swap: false,
+                                // Not available in TokenData - requires on-chain query
+                                coin_creator: None,
+                                sol_change: 0.0, // Not applicable for queue-based trades (no observed transaction)
+                                token_change: 0.0, // Not applicable for queue-based trades (no observed transaction)
+                                liquidity: token_data.liquidity_usd,
+                                virtual_sol_reserves: 0, // Not available - requires DEX pool state query
+                                virtual_token_reserves: 0, // Not available - requires DEX pool state query
+                            };
+
+                            let app_state = Arc::new(config.app_state.clone());
+                            let swap_config = Arc::new(config.swap_config.clone());
+
+                            // Map DEX type to SwapProtocol using helper function
+                            let protocol = parse_swap_protocol(&token_data.dex);
+
+                            // Acquire semaphore permit to limit concurrency
+                            let semaphore = concurrent_buys.clone();
+                            let permit = match semaphore.acquire_owned().await {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    logger.log(format!("Failed to acquire semaphore: {}, skipping token", e).red().to_string());
+                                    failed_lines.push(line);
+                                    continue;
+                                }
+                            };
+
+                            // Clone resources for spawned task
+                            let result_tx = result_tx.clone();
+                            let token_address = token_data.address.clone();
+                            let task_id = format!("buy_{}", token_address);
+
+                            // Spawn task with result tracking and handle registration
+                            let handle = tokio::spawn(async move {
+                                let _permit = permit; // Hold permit for task lifetime
+                                let result = execute_buy(trade_info, app_state, swap_config, protocol).await;
+
+                                // Send result to handler - marks as processed only on success
+                                let _ = result_tx.send((token_address, result.map_err(|e| e.to_string())));
+                            });
+
+                            // Register task handle for tracking and cleanup
+                            task_handles.insert(task_id, handle);
+
+                            processed_lines += 1;
+                        }
+                        Err(e) => {
+                            logger.log(format!("Error parsing token data: {} - Line will be retained for retry", e).yellow().to_string());
+                            failed_lines.push(line);
+                        }
+                    }
+                }
+
+                // Only clear successfully processed lines, keep failed ones for retry
+                // Use atomic file operations to prevent data corruption
+                if processed_lines > 0 || !failed_lines.is_empty() {
+                    let remaining_content = failed_lines.join("\n");
+                    let temp_file = "token_queue.json.tmp";
+
+                    // Atomic write: temp file -> sync -> rename (while still holding lock)
+                    match std::fs::File::create(temp_file) {
+                        Ok(mut temp_file_handle) => {
+                            if let Err(e) = temp_file_handle.write_all(remaining_content.as_bytes()) {
+                                logger.log(format!("Failed to write temp file: {}", e).red().to_string());
+                            } else if let Err(e) = temp_file_handle.sync_all() {
+                                logger.log(format!("Failed to sync temp file: {}", e).red().to_string());
+                            } else if let Err(e) = std::fs::rename(temp_file, "token_queue.json") {
+                                logger.log(format!("Failed to rename temp file: {}", e).red().to_string());
+                            } else if !failed_lines.is_empty() {
+                                logger.log(format!("Processed {}/{} lines. {} failed lines retained for retry",
+                                    processed_lines, lines.len(), failed_lines.len()).yellow().to_string());
+                            }
+                        }
+                        Err(e) => {
+                            logger.log(format!("Failed to create temp file: {} - original queue preserved", e).red().to_string());
+                        }
+                    }
+                }
+
+                // Unlock after atomic rewrite/processing
+                let _ = file.unlock();
+
+                // Prevent unbounded memory growth by clearing processed tokens history periodically
+                {
+                    let mut tokens = processed_tokens_shared.lock().await;
+                    if tokens.len() > MAX_PROCESSED_TOKENS {
+                        logger.log(format!("Processed tokens cache exceeded {} entries, clearing history",
+                            MAX_PROCESSED_TOKENS).yellow().to_string());
+                        tokens.clear();
+                    }
+                }
+            }
+            Err(_) => {
+                // File probably doesn't exist yet or read error, unlock and continue
+                let _ = file.unlock();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 use std::str::FromStr;
 use bs58;
 use std::sync::Arc;
@@ -505,137 +870,7 @@ pub async fn start_target_wallet_monitoring(config: SniperConfig) -> Result<(), 
 
 
 
-/// Main function to start sniper bot
-pub async fn start_dex_monitoring(config: SniperConfig) -> Result<(), String> {
-    let logger = Logger::new("[SNIPER-BOT] => ".green().bold().to_string());
-    
-    // Reset streaming flag for fresh start
-    SHOULD_CONTINUE_STREAMING.store(true, Ordering::SeqCst);
-    
-     // Start enhanced selling monitor
-     let app_state_clone = Arc::new(config.app_state.clone());
-     let swap_config_clone = Arc::new(config.swap_config.clone());
-     tokio::spawn(async move {
-         start_enhanced_selling_monitor(app_state_clone, swap_config_clone).await;
-     });
-    
-    // Connect to Yellowstone gRPC
-    let mut client = GeyserGrpcClient::build_from_shared(config.yellowstone_grpc_http.clone())
-        .map_err(|e| format!("Failed to build client: {}", e))?
-        .x_token::<String>(Some(config.yellowstone_grpc_token.clone()))
-        .map_err(|e| format!("Failed to set x_token: {}", e))?
-        .tls_config(ClientTlsConfig::new().with_native_roots())
-        .map_err(|e| format!("Failed to set tls config: {}", e))?
-        .connect()
-        .await
-        .map_err(|e| format!("Failed to connect: {}", e))?;
 
-    // Set up subscribe
-    let mut retry_count = 0;
-    const MAX_RETRIES: u32 = 3;
-    let (subscribe_tx, mut stream) = loop {
-        match client.subscribe().await {
-            Ok(pair) => break pair,
-            Err(e) => {
-                retry_count += 1;
-                if retry_count >= MAX_RETRIES {
-                    return Err(format!("Failed to subscribe after {} attempts: {}", MAX_RETRIES, e));
-                }
-                time::sleep(Duration::from_secs(5)).await;
-            }
-        }
-    };
-
-    // Convert to Arc to allow cloning across tasks
-    let subscribe_tx = Arc::new(tokio::sync::Mutex::new(subscribe_tx));
-
-    // Create config for subscription
-    let dexs = vec![
-        PUMP_FUN_PROGRAM.to_string(),
-        PUMP_SWAP_PROGRAM.to_string(),
-        RAYDIUM_LAUNCHPAD_PROGRAM.to_string(),
-    ];
-    // Set up subscription
-    let subscription_request = SubscribeRequest {
-        transactions: maplit::hashmap! {
-            "All".to_owned() => SubscribeRequestFilterTransactions {
-                vote: Some(false), // Exclude vote transactions
-                failed: Some(false), // Exclude failed transactions
-                signature: None,
-                account_include: dexs.clone(), // Only include transactions involving our targets
-                account_exclude: vec![], // Listen to all transactions
-                account_required: Vec::<String>::new(),
-            }
-        },
-        commitment: Some(CommitmentLevel::Processed as i32),
-        ..Default::default()
-    };
-    
-    subscribe_tx
-        .lock()
-        .await
-        .send(subscription_request)
-        .await
-        .map_err(|e| format!("Failed to send subscribe request: {}", e))?;
-    
-    // Create Arc config for tasks
-    let config = Arc::new(config);
-
-    // Spawn heartbeat task
-    let subscribe_tx_clone = subscribe_tx.clone();
-    
-    tokio::spawn(async move {
-        let mut interval = time::interval(Duration::from_secs(30));
-        
-        loop {
-            interval.tick().await;
-            if let Err(_e) = send_heartbeat_ping(&subscribe_tx_clone).await {
-                break;
-            }
-        }
-    });
-    
-    // Main stream processing loop
-    while SHOULD_CONTINUE_STREAMING.load(Ordering::SeqCst) {
-        match stream.next().await {
-            Some(msg_result) => {
-                match msg_result {
-                    Ok(msg) => {
-                        if let Err(e) = process_message_for_dex_monitoring(&msg, &subscribe_tx, config.clone(), &logger).await {
-                            logger.log(format!("Error processing message: {}", e).red().to_string());
-                        }
-                    },
-                    Err(e) => {
-                        logger.log(format!("Stream error: {:?}", e).red().to_string());
-                        // Check if it's a connection limit error
-                        if format!("{:?}", e).contains("Maximum connection count reached") {
-                            logger.log("🚫 Connection limit reached - this indicates a connection leak. Streams should be properly closed when tokens are sold.".red().bold().to_string());
-                        }
-                        // Try to reconnect
-                        break;
-                    },
-                }
-            },
-            None => {
-                logger.log("Stream ended".yellow().to_string());
-                break;
-            }
-        }
-    }
-    
-    if !SHOULD_CONTINUE_STREAMING.load(Ordering::SeqCst) {
-        // Explicitly drop the stream and client to close connections
-        drop(stream);
-        drop(subscribe_tx);
-        drop(client);
-        
-        return Ok(());
-    }
-    
-    // Here you would implement reconnection logic
-    
-    Ok(())
-}
 
 
 
@@ -3226,57 +3461,6 @@ async fn process_message_for_target_monitoring(
 }
 
 
-/// Process incoming stream messages
-async fn process_message_for_dex_monitoring(
-    msg: &SubscribeUpdate,
-    _subscribe_tx: &Arc<tokio::sync::Mutex<impl Sink<SubscribeRequest, Error = impl std::fmt::Debug> + Unpin>>,
-    config: Arc<SniperConfig>,
-    logger: &Logger,
-) -> Result<(), String> {
-    // Handle ping messages
-    if let Some(UpdateOneof::Ping(_ping)) = &msg.update_oneof {
-        return Ok(());
-    }
-    
-    // Handle transaction messages
-    if let Some(UpdateOneof::Transaction(txn)) = &msg.update_oneof {
-        let inner_instructions = match &txn.transaction {
-            Some(txn_info) => match &txn_info.meta {
-                Some(meta) => meta.inner_instructions.clone(),
-                None => vec![],
-            },
-            None => vec![],
-        };
-
-        if !inner_instructions.is_empty() {
-            let cpi_log_data = inner_instructions
-                .iter()
-                .flat_map(|inner| &inner.instructions)
-                .find(|ix| ix.data.len() == 368 || ix.data.len() == 266 || ix.data.len() == 270  || ix.data.len() == 146 || ix.data.len() == 170 || ix.data.len() == 138 )
-                .map(|ix| ix.data.clone());
-
-            if let Some(data) = cpi_log_data {
-                let config = config.clone();
-                let logger = logger.clone();
-                let txn = txn.clone();
-                tokio::spawn(async move {
-                    if let Some(parsed_data) = crate::processor::transaction_parser::parse_transaction_data(&txn, &data) {
-                        if parsed_data.mint != "So11111111111111111111111111111111111111112" {
-                            // Check if this token mint is in our focus token list
-                            if FOCUS_TOKEN_LIST.contains_key(&parsed_data.mint) {
-                                // Process the transaction for this focus token (no extra logs here)
-                                let _ = handle_sniper_bot_logic(parsed_data, config, None, &txn, &logger).await;
-                            }
-                            // No logging for tokens not in focus list
-                        }
-                    }
-                });
-            }
-        }
-    }
-    
-    Ok(())  
-}
 
 
 /// SNIPER BOT: Main logic for handling both target wallet and DEX monitoring transactions

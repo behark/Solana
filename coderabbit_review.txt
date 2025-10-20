@@ -1,0 +1,305 @@
+Starting CodeRabbit review in plain text mode...
+
+Connecting to review service
+Setting up
+Analyzing
+Reviewing
+
+============================================================================
+File: python/scoring/token_scorer.py
+Line: 90 to 92
+Type: refactor_suggestion
+
+Comment:
+Replace magic number 2.22 with a named constant or calculated value.
+
+The hardcoded multiplier 2.22 lacks explanation. This appears to scale the base scores (max 45: liquidity 10 + volume 20 + holder 15) to a 0-100 range.
+
+
+
+Define this as a named constant with clear documentation:
+
++    # Scale factor to normalize base scores (max 45) to 0-100 range
++    SCORE_MULTIPLIER = 100.0 / 45.0  # ~2.22
++
+     async def score_token(self, token_data: Dict) -> Tuple[float, Dict]:
+         """
+         Score a token from 0-100 based on multiple factors
+         Returns: (score, analysis_details)
+         """
+         if not self.session:
+             await self.initialize()
+ 
+         analysis = {
+             'timestamp': datetime.now().isoformat(),
+             'token_address': token_data.get('address', token_data.get('mint_address', '')),
+             'chain': token_data.get('chain', 'unknown'),
+             'scores': {},
+             'warnings': [],
+             'positives': []
+         }
+ 
+         total_score = 0.0
+ 
+         # Score based on available data
+-        liquidity_score = await self._score_liquidity(token_data) * 2.22
+-        volume_score = await self._score_volume(token_data) * 2.22
+-        holder_score = await self._score_holder_distribution(token_data) * 2.22
++        liquidity_score = await self._score_liquidity(token_data) * self.SCORE_MULTIPLIER
++        volume_score = await self._score_volume(token_data) * self.SCORE_MULTIPLIER
++        holder_score = await self._score_holder_distribution(token_data) * self.SCORE_MULTIPLIER
+
+
+
+
+============================================================================
+File: python/chains/bnb_monitor.py
+Line: 318 to 375
+Type: potential_issue
+
+Comment:
+Critical stubs: Implement honeypot detection and liquidity calculation before production use.
+
+The check_honeypot and get_pool_liquidity methods are stubs that return fake data:
+- check_honeypot always returns is_honeypot: False (extremely dangerous)
+- get_pool_liquidity always returns 1000.0 (misleading)
+
+These stubs make the monitor report all tokens as safe with liquidity, which could lead to financial losses if users rely on this data.
+
+
+
+
+The comments provide excellent guidance on implementation approaches. Do you want me to generate implementation code for either of these methods using GoPlus Security API for honeypot detection or Chainlink price feeds for liquidity calculation?
+
+Recommended priority:
+1. Implement honeypot detection first (GoPlus API is straightforward)
+2. Then implement liquidity calculation
+3. Add integration tests to verify both work correctly
+
+Prompt for AI Agent:
+In python/chains/bnb_monitor.py around lines 318 to 375, both check_honeypot and get_pool_liquidity are dangerous stubs returning fake values; replace them with real implementations: for check_honeypot call an external API such as GoPlus Security (async GET via self.session to their token_security endpoint with contract_addresses), parse response fields like is_honeypot, buy_tax, sell_tax and return them with proper warnings on error and retries/backoff and exception handling; for get_pool_liquidity fetch a BNB price (Chainlink feed via web3 contract or a reliable REST API like CoinGecko), then read pool reserves from the pair contract (V2) or use pool balance/slot for V3 via self.w3_http.eth.contract and getReserves()/get_balance, convert reserves by token decimals, compute USD liquidity (reserve_wbnb  bnb_price_usd  2 for V2), handle token0/token1 ordering, include robust error handling, timeouts and fallbacks to avoid returning misleading defaults, and log and surface failures instead of returning hardcoded values.
+
+
+
+============================================================================
+File: python/multichain_alerts.py
+Line: 19 to 25
+Type: potential_issue
+
+Comment:
+Critical: Remove hardcoded credentials immediately.
+
+Lines 24-25 contain hardcoded Telegram bot token and chat ID in plaintext. This is a serious security vulnerability that exposes your bot to unauthorized access.
+
+
+
+Apply this diff to remove hardcoded credentials:
+
+ # FIXED: Load environment variables
+ load_dotenv()
+ 
+-# FIXED: Load credentials from .env, with fallback to old values
+-# !! WARNING: Please move these values to your .env file! !!
+-BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', "7558858258:AAFSRDFIG4Fh15iAehE8bGIg-iWuBblR6SU")
+-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', "1507876704")
++# Load credentials from .env (no fallback for security)
++BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
++CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+
+
+Immediate actions required:
+1. Rotate the exposed bot token via BotFather
+2. Remove the token from git history using tools like git-filter-repo or BFG Repo-Cleaner
+3. Add the .env file to .gitignore if not already present
+4. Never commit credentials to version control
+
+As per coding guidelines
+
+Prompt for AI Agent:
+In python/multichain_alerts.py around lines 19 to 25 there are hardcoded Telegram credentials (BOT_TOKEN and CHAT_ID); remove the literal token and chat id immediately and replace them with environment lookups only (e.g., os.getenv('TELEGRAM_BOT_TOKEN') and os.getenv('TELEGRAM_CHAT_ID')) and fail fast if they are missing so the app won't run with defaults; rotate the exposed bot token via BotFather, purge the token from git history using git-filter-repo or BFG, ensure your .env is listed in .gitignore, and do not add any secret defaults to source—only load from environment or secret manager.
+
+
+
+============================================================================
+File: launch_bot.sh
+Line: 1 to 3
+Type: potential_issue
+
+Comment:
+Add error handling for robustness.
+
+The script lacks error handling for the cd command and doesn't verify that required paths exist before execution. If the virtual environment or Python script is missing, this will produce confusing errors.
+
+
+
+Apply this diff to add error handling:
+
+ #!/bin/bash
+-cd "$(dirname "$0")"
+-"venv/bin/python" "python/unified_monitor.py"
++cd "$(dirname "$0")" || { echo "Failed to change directory"; exit 1; }
++
++if [ ! -f "venv/bin/python" ]; then
++    echo "Error: Virtual environment not found at venv/bin/python"
++    exit 1
++fi
++
++if [ ! -f "python/unified_monitor.py" ]; then
++    echo "Error: Monitor script not found at python/unified_monitor.py"
++    exit 1
++fi
++
++"venv/bin/python" "python/unified_monitor.py"
+
+Prompt for AI Agent:
+In launch_bot.sh around lines 1 to 3, the script currently does not check that cd succeeded or that the virtualenv python and the python/unified_monitor.py script exist and are executable; update the script to immediately exit if cd fails, verify that "venv/bin/python" exists and is executable and that "python/unified_monitor.py" exists (log a clear error to stderr and exit non‑zero if any check fails), and then run the python interpreter (preferably using exec so the process is replaced). Ensure all failure paths print concise error messages indicating which file or command was missing or not executable.
+
+
+
+============================================================================
+File: src/processor/sniper_bot.rs
+Line: 137 to 142
+Type: potential_issue
+
+Comment:
+Fix queue file locking to avoid data loss and races.
+
+- You unlock before write/rename; concurrent writers can truncate or drop newly appended lines.
+- You read via read_to_string on the path, not the locked handle.
+
+Hold the lock for read–process–write and read from the same handle.
+
+Apply:
+
+-        // Read file content while holding lock
+-        let content_result = std::fs::read_to_string("token_queue.json");
+-
+-        // Always unlock before processing to minimize lock hold time
+-        let _ = file.unlock();
++        // Read file content while holding the same locked handle
++        use std::io::{Read, Seek, SeekFrom, Write};
++        let content_result = (|| -> Result {
++            let mut buf = String::new();
++            file.seek(SeekFrom::Start(0))?;
++            file.read_to_string(&mut buf)?;
++            Ok(buf)
++        })();
+@@
+-                    match std::fs::File::create(temp_file) {
++                    match std::fs::File::create(temp_file) {
+                         Ok(mut file) => {
+-                            use std::io::Write;
+-
+                             if let Err(e) = file.write_all(remaining_content.as_bytes()) {
+                                 logger.log(format!("Failed to write temp file: {}", e).red().to_string());
+                             } else if let Err(e) = file.sync_all() {
+                                 logger.log(format!("Failed to sync temp file: {}", e).red().to_string());
+                             } else if let Err(e) = std::fs::rename(temp_file, "token_queue.json") {
+                                 logger.log(format!("Failed to rename temp file: {}", e).red().to_string());
+                             } else if !failed_lines.is_empty() {
+                                 logger.log(format!("Processed {}/{} lines. {} failed lines retained for retry",
+                                     processed_lines, lines.len(), failed_lines.len()).yellow().to_string());
+                             }
+                         }
+                         Err(e) => {
+                             logger.log(format!("Failed to create temp file: {} - original queue preserved", e).red().to_string());
+                         }
+                     }
+                 }
+ 
+                 // Prevent unbounded memory growth by clearing processed tokens history periodically
+                 {
+                     let mut tokens = processed_tokens_shared.lock().await;
+                     if tokens.len() > MAX_PROCESSED_TOKENS {
+                         logger.log(format!("Processed tokens cache exceeded {} entries, clearing history",
+                             MAX_PROCESSED_TOKENS).yellow().to_string());
+                         tokens.clear();
+                     }
+                 }
+             }
+             Err(_) => {
+                 // File probably doesn't exist yet, that's fine
+             }
+         }
++        // Unlock after atomic rewrite/processing
++        let _ = file.unlock();
+
+
+
+Also applies to: 318-342
+
+Prompt for AI Agent:
+In src/processor/sniper_bot.rs around lines 137 to 142 (and similarly at 318–342), the code releases the file lock before reading/writing and uses std::fs::read_to_string(path) instead of operating on the locked file handle, which allows concurrent writers to truncate or drop data; hold the lock across read→process→write/rename operations and perform all I/O using the locked file handle (e.g., seek to start, read from the locked handle, process, truncate and write back to the same handle or write to a temp file then fsync and atomically rename while still holding the lock), only unlock after the final fsync/rename to prevent races and data loss.
+
+
+
+============================================================================
+File: src/processor/sniper_bot.rs
+Line: 251 to 271
+Type: potential_issue
+
+Comment:
+Compile fix: wrong type for coin_creator in queue TradeInfo.
+
+TradeInfoFromToken.coin_creator is Option. Using "" (String) won’t compile.
+
+Apply:
+
+-                                // TODO: Type inconsistency - coin_creator should be Option not String
+-                                // Current code uses empty string as sentinel, but line 3019 uses Option
+-                                // RECOMMENDED FIX: Change TradeInfoFromToken.coin_creator to Option
+-                                // and update all usages (lines 148, 3019, 3080, 3193) to use None instead of ""
+-                                coin_creator: "".to_string(), // Not available in TokenData - requires on-chain query
++                                // Not available in TokenData - use None
++                                coin_creator: None,
+
+Prompt for AI Agent:
+In src/processor/sniper_bot.rs around lines 251 to 271, the TradeInfoFromToken construction uses coin_creator: "".to_string() but TradeInfoFromToken.coin_creator is an Option; replace the empty-string sentinel with coin_creator: None so the field type matches; if any other code in this expression expects a String unwrap before use, ensure callers handle the Option (use .as_deref(), match, or unwrap_or) rather than changing the literal here.
+
+
+
+============================================================================
+File: src/processor/sniper_bot.rs
+Line: 1 to 6
+Type: potential_issue
+
+Comment:
+Missing imports for collections used below.
+
+HashSet and VecDeque are referenced but never imported; this will not compile.
+
+Apply:
+
+ use serde::Deserialize;
+ use tokio_util::sync::CancellationToken;
+ use fs2::FileExt;
+ use tokio::sync::mpsc;
+ use dashmap::DashMap;
++use std::collections::{HashSet, VecDeque};
+
+Prompt for AI Agent:
+In src/processor/sniper_bot.rs around lines 1 to 6, the file references HashSet and VecDeque later but does not import them; add a single import from std::collections to bring in HashSet and VecDeque (e.g., use std::collections::{HashSet, VecDeque};) so the types resolve and the file compiles.
+
+
+
+============================================================================
+File: src/main.rs
+Line: 17 to 18
+Type: potential_issue
+
+Comment:
+Fix broken import: remove non-existent start_dex_monitoring.
+
+start_dex_monitoring was removed; keeping it in the use list will fail to compile.
+
+Apply:
+
+-        sniper_bot::{start_target_wallet_monitoring, start_token_queue_monitoring, start_dex_monitoring, SniperConfig},
++        sniper_bot::{start_token_queue_monitoring, SniperConfig},
+
+Prompt for AI Agent:
+In src/main.rs around lines 17 to 18, the use list references a removed symbol start_dex_monitoring which will fail compilation; remove start_dex_monitoring from the import list (leave start_target_wallet_monitoring, start_token_queue_monitoring, SniperConfig) and adjust the punctuation/commas so the use statement remains valid, then rebuild to confirm no other references to start_dex_monitoring remain.
+
+
+
+Review completed ✔

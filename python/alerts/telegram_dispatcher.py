@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """
 Enhanced Telegram Alert Dispatcher
 Sends formatted alerts with rich information to Telegram

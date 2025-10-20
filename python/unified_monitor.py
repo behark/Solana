@@ -2,8 +2,15 @@
 """
 Unified Multi-Chain Memecoin Monitoring System
 
-This script combines real-time token discovery with API-based data enrichment to provide a comprehensive monitoring solution.
+This script combines real-time token discovery with API-based data enrichment
+to provide a comprehensive monitoring solution.
 
+** Refactored Version **
+- Uses asyncio.PriorityQueue for efficient alert handling.
+- Uses asyncio.to_thread for non-blocking file I/O.
+- Persists 'sent_alerts' to disk to prevent duplicates on restart.
+- Implements smarter Dexscreener pair logic.
+- Fixes signal handling for graceful shutdown.
 """
 
 import asyncio
@@ -11,7 +18,7 @@ import logging
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 from dataclasses import dataclass, field
 import json
 import time
@@ -21,7 +28,8 @@ from dotenv import load_dotenv
 import aiohttp
 
 # Add src to path
-
+# (Assuming your monitors are in a 'chains' directory)
+# sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Import chain monitors
 from chains.solana_monitor import SolanaMonitor
@@ -97,9 +105,14 @@ class UnifiedMonitor:
             'base': int(os.getenv('BASE_ALERT_PERCENTAGE', 5))
         }
 
-        # Track sent alerts to avoid duplicates
-        self.sent_alerts: Set[str] = set()
-        self.alert_queue: List[Dict] = []
+        # --- FIXED: Use efficient PriorityQueue and persist sent_alerts ---
+        self.sent_alerts_file = "sent_alerts.json"
+        self.sent_alerts: Set[str] = self._load_sent_alerts()
+        self.alert_queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        
+        # Holds alerts if quotas are full, to be re-queued later
+        self.holding_queue: List[Tuple] = [] 
+        # ---
 
         # Initialize components
         self.scorer = TokenScorer()
@@ -125,6 +138,31 @@ class UnifiedMonitor:
         logger.info(f"Enabled chains: {[chain for chain, enabled in self.chain_enabled.items() if enabled]}")
         logger.info(f"Chain distribution: {self.chain_alert_distribution}")
         logger.info(f"Minimum alert score threshold: {self.minimum_alert_score}")
+        logger.info(f"Loaded {len(self.sent_alerts)} sent alerts from {self.sent_alerts_file}")
+
+    # --- ADDED: Persistence for sent_alerts ---
+    def _load_sent_alerts(self) -> Set[str]:
+        """Load the set of sent alert keys from a file"""
+        if not os.path.exists(self.sent_alerts_file):
+            return set()
+        try:
+            with open(self.sent_alerts_file, 'r') as f:
+                data = json.load(f)
+                return set(data)
+        except (json.JSONDecodeError, IOError) as e:
+            logger.warning(f"Could not load sent_alerts.json, starting fresh: {e}")
+            return set()
+
+    def _save_sent_alerts(self):
+        """Save the set of sent alert keys to a file"""
+        # This is blocking, but should be fast. 
+        # For ultra-high performance, this could also be run in a thread.
+        try:
+            with open(self.sent_alerts_file, 'w') as f:
+                json.dump(list(self.sent_alerts), f)
+        except IOError as e:
+            logger.error(f"Failed to save sent_alerts.json: {e}")
+    # ---
 
     def _calculate_chain_quotas(self) -> Dict[str, int]:
         """Calculate daily alert quotas per chain"""
@@ -135,14 +173,22 @@ class UnifiedMonitor:
 
     def _get_alert_key(self, token_data: Dict) -> str:
         """Generate unique key for alert deduplication"""
-        return f"{token_data.get('chain')}_{token_data.get('address', '')}_{token_data.get('pair_address', '')}"
+        # Use token address as primary key, fallback to pair address
+        address = token_data.get('address', token_data.get('new_token'))
+        if address:
+            return f"{token_data.get('chain')}_{address}"
+        
+        # Fallback for systems that only provide pair
+        pair_address = token_data.get('pair_address', token_data.get('pool_address'))
+        return f"{token_data.get('chain')}_{pair_address}"
 
     async def process_token_discovery(self, token_data: Dict, chain: str):
         """Process a newly discovered token"""
         try:
             # Add chain info
             token_data['chain'] = chain
-            token_data['discovered_at'] = datetime.now().isoformat()
+            if 'discovered_at' not in token_data:
+                token_data['discovered_at'] = datetime.now().isoformat()
 
             # Generate unique key
             alert_key = self._get_alert_key(token_data)
@@ -155,10 +201,10 @@ class UnifiedMonitor:
             enriched_data = await self.enrich_token_data(token_data)
 
             # Debug: Log enrichment results
-            logger.info(f"Enriched data - Liquidity: ${enriched_data.get('liquidity_usd', 0):,.0f}, "
-                        f"Volume: ${enriched_data.get('volume_24h', 0):,.0f}, "
-                        f"Holders: {enriched_data.get('holders', 0)}, "
-                        f"MarketCap: ${enriched_data.get('market_cap', 0):,.0f}")
+            logger.debug(f"Enriched data - Liquidity: ${enriched_data.get('liquidity_usd', 0):,.0f}, "
+                         f"Volume: ${enriched_data.get('volume_24h', 0):,.0f}, "
+                         f"Holders: {enriched_data.get('holders', 0)}, "
+                         f"MarketCap: ${enriched_data.get('market_cap', 0):,.0f}")
 
             # Score the token
             score, analysis = await self.scorer.score_token(enriched_data)
@@ -180,97 +226,155 @@ class UnifiedMonitor:
                 priority = 'low'
                 self.stats.low_confidence_alerts += 1
 
+            # --- FIXED: Use PriorityQueue ---
             # Add to queue if meets threshold
             if score >= self.minimum_alert_score:
-                self.alert_queue.append({
-                    'token_data': enriched_data,
-                    'priority': priority,
-                    'timestamp': datetime.now()
-                })
+                priority_num = 0 if priority == 'high' else 1 if priority == 'medium' else 2
+                
+                # We use -score so a higher score has a higher priority (lower number)
+                # We add datetime for tie-breaking
+                alert_tuple = (
+                    priority_num,
+                    -score,
+                    datetime.now(),
+                    {'token_data': enriched_data, 'priority': priority}
+                )
+                await self.alert_queue.put(alert_tuple)
 
+            # --- FIXED: Non-blocking file I/O ---
             # Write to file for Rust bot
-            with open('token_queue.json', 'a') as f:
-                json.dump(enriched_data, f)
-                f.write('\n')
+            # This uses asyncio.to_thread to run the blocking file I/O
+            # in a separate thread, not blocking the main async loop.
+            # Requires Python 3.9+
+            def write_data_to_file():
+                try:
+                    with open('token_queue.json', 'a') as f:
+                        json.dump(enriched_data, f)
+                        f.write('\n')
+                except Exception as e:
+                    logger.error(f"Failed to write to token_queue.json: {e}")
+
+            await asyncio.to_thread(write_data_to_file)
 
             logger.info(f"Token discovered on {chain}: {enriched_data.get('symbol', 'Unknown')} "
-                       f"(Score: {score}, Priority: {priority})")
+                        f"(Score: {score}, Priority: {priority})")
 
         except Exception as e:
-            logger.error(f"Error processing token discovery: {e}")
+            logger.error(f"Error processing token discovery: {e}", exc_info=True)
             self.stats.errors += 1
 
     async def enrich_token_data(self, token_data: Dict) -> Dict:
         """Enrich token data with information from Dexscreener"""
         try:
-            if not self.session:
-                self.session = aiohttp.ClientSession()
+            # --- FIXED: Removed redundant session check ---
+            # self.session is now reliably created in run()
+            
+            # Get pair/pool address
+            pair_address = token_data.get('pair_address') or token_data.get('pool_address')
+            
+            # Solana often uses the token mint address as the "pair"
+            if not pair_address and token_data['chain'] == 'solana':
+                 pair_address = token_data.get('address') # 'address' is the mint
 
-            # Get pair/pool address (different field names for V2 vs V3)
-            pair_address = token_data.get('pair_address') or token_data.get('pool_address') or token_data.get('mint_address')
             if not pair_address:
                 logger.debug(f"No pair/pool address found for token: {token_data.get('symbol', 'Unknown')}")
                 return token_data
 
-            url = f"{DEXSCREENER_API}/pairs/{token_data['chain']}/{pair_address}"
+            chain_map = {"bnb": "bsc", "solana": "solana", "ethereum": "ethereum", "base": "base"}
+            ds_chain = chain_map.get(token_data['chain'].lower(), token_data['chain'])
+            url = f"{DEXSCREENER_API}/pairs/{ds_chain}/{pair_address}"
             async with self.session.get(url) as response:
+                
+                # --- ADDED: Rate limit check ---
+                if response.status == 429:
+                    logger.warning(f"Dexscreener rate limit hit. Skipping enrichment for {pair_address}")
+                    return token_data
+                
                 if response.status == 200:
                     data = await response.json()
+                    
+                    # --- FIXED: Smarter pair selection ---
                     if data.get('pairs'):
-                        pair_data = data['pairs'][0]
+                        best_pair = None
+                        target_base_token = token_data.get('base_token', '').lower()
+
+                        if target_base_token:
+                            for pair in data['pairs']:
+                                base_addr = pair.get('baseToken', {}).get('address', '').lower()
+                                if base_addr == target_base_token:
+                                    best_pair = pair
+                                    break # Found the exact pair
+                        
+                        # Fallback: if no exact match, use the one with most liquidity
+                        if not best_pair:
+                            best_pair = max(data['pairs'], key=lambda p: float(p.get('liquidity', {}).get('usd', 0)))
+
+                        pair_data = best_pair
+                        # ---
+                        
                         token_data['liquidity_usd'] = float(pair_data.get('liquidity', {}).get('usd', 0))
                         token_data['volume_24h'] = float(pair_data.get('volume', {}).get('h24', 0))
                         token_data['price_usd'] = float(pair_data.get('priceUsd', 0))
                         token_data['price_change_24h'] = float(pair_data.get('priceChange', {}).get('h24', 0))
                         token_data['market_cap'] = float(pair_data.get('marketCap', 0))
-                        token_data['holders'] = int(pair_data.get('holders', 0))
+                        # Dexscreener holders data can be unreliable, use with caution
+                        # token_data['holders'] = int(pair_data.get('holders', 0))
                         token_data['dex'] = pair_data.get('dexId', 'unknown')
+                else:
+                    logger.debug(f"Dexscreener API error {response.status} for {pair_address}")
+
         except Exception as e:
-            logger.error(f"Error enriching token data: {e}")
+            logger.error(f"Error enriching token data: {e}", exc_info=True)
         
         return token_data
 
+    # --- FIXED: Complete rewrite of dispatch_alerts ---
     async def dispatch_alerts(self):
-        """Dispatch alerts based on quotas and priorities"""
+        """Dispatch alerts based on quotas and priorities from the PriorityQueue"""
         while self.running:
             try:
                 # Reset daily stats if needed
                 if datetime.now().date() > self.stats.last_alert_reset.date():
                     self.stats.reset_daily_stats()
                     self.chain_alerts_sent.clear()
-                    self.sent_alerts.clear()
+                    self.sent_alerts.clear() # Clear in-memory, file will be overwritten
+                    self._save_sent_alerts()
+                    
+                    # --- ADDED: Re-queue held alerts ---
+                    logger.info(f"Daily reset: Re-queuing {len(self.holding_queue)} held alerts.")
+                    for alert_tuple in self.holding_queue:
+                        await self.alert_queue.put(alert_tuple)
+                    self.holding_queue.clear()
+                    # ---
 
-                # Check if we have alerts to send
-                if not self.alert_queue:
-                    await asyncio.sleep(5)
-                    continue
-
-                # Sort queue by priority and score
-                self.alert_queue.sort(
-                    key=lambda x: (
-                        0 if x['priority'] == 'high' else 1 if x['priority'] == 'medium' else 2,
-                        -x['token_data']['score']
-                    )
-                )
-
-                # Process alerts respecting quotas
-                alerts_to_send = []
-                for alert in self.alert_queue[:]:
+                try:
+                    # Get highest priority item, wait max 5s if queue is empty
+                    alert_tuple = await asyncio.wait_for(self.alert_queue.get(), timeout=5.0)
+                    # alert_tuple is (priority_num, -score, timestamp, alert_dict)
+                    alert = alert_tuple[3] 
                     chain = alert['token_data']['chain']
+                    alert_key = self._get_alert_key(alert['token_data'])
 
-                    # Check chain quota
-                    if self.chain_alerts_sent[chain] >= self.chain_quotas[chain]:
+                    # Double-check if sent (in case it was held over a reset)
+                    if alert_key in self.sent_alerts:
+                        self.alert_queue.task_done()
                         continue
 
-                    # Check daily limit
+                    # Check daily total quota
                     if self.stats.alerts_sent_today >= self.daily_alert_target:
-                        break
+                        logger.warning(f"Daily alert quota ({self.daily_alert_target}) hit. Holding alert.")
+                        self.holding_queue.append(alert_tuple)
+                        self.alert_queue.task_done()
+                        continue 
 
-                    alerts_to_send.append(alert)
-                    self.alert_queue.remove(alert)
-
-                # Send alerts
-                for alert in alerts_to_send:
+                    # Check chain-specific quota
+                    if self.chain_alerts_sent[chain] >= self.chain_quotas[chain]:
+                        logger.warning(f"Chain quota ({self.chain_quotas[chain]}) hit for {chain}. Holding alert.")
+                        self.holding_queue.append(alert_tuple)
+                        self.alert_queue.task_done()
+                        continue
+                    
+                    # --- Quotas passed, send the alert ---
                     try:
                         await self.telegram.send_alert(
                             alert['token_data'],
@@ -279,27 +383,30 @@ class UnifiedMonitor:
 
                         # Update counters
                         self.stats.alerts_sent_today += 1
-                        self.chain_alerts_sent[alert['token_data']['chain']] += 1
-                        self.sent_alerts.add(self._get_alert_key(alert['token_data']))
+                        self.chain_alerts_sent[chain] += 1
+                        self.sent_alerts.add(alert_key)
+                        self._save_sent_alerts() # Save sent status to disk
 
                         # Rate limiting
                         await asyncio.sleep(0.5)
 
                     except Exception as e:
-                        logger.error(f"Error sending alert: {e}")
+                        logger.error(f"Error sending alert: {e}. Holding alert to retry later.")
+                        self.holding_queue.append(alert_tuple) # Put it back if send fails
+                    
+                    finally:
+                        self.alert_queue.task_done() # Mark as processed
 
-                # Clean old alerts from queue (older than 1 hour)
-                cutoff_time = datetime.now() - timedelta(hours=1)
-                self.alert_queue = [
-                    alert for alert in self.alert_queue
-                    if alert['timestamp'] > cutoff_time
-                ]
-
-                await asyncio.sleep(10)
+                except asyncio.TimeoutError:
+                    # Queue was empty, just loop again
+                    continue
+                
+                # --- REMOVED: Old queue cleanup logic ---
 
             except Exception as e:
-                logger.error(f"Error in alert dispatcher: {e}")
+                logger.error(f"Error in alert dispatcher: {e}", exc_info=True)
                 await asyncio.sleep(5)
+    # ---
 
     async def monitor_chain(self, chain_name: str, monitor):
         """Monitor a specific blockchain"""
@@ -315,7 +422,7 @@ class UnifiedMonitor:
                     await self.process_token_discovery(token_data, chain_name)
 
             except Exception as e:
-                logger.error(f"Error in {chain_name} monitor: {e}")
+                logger.error(f"Error in {chain_name} monitor: {e}", exc_info=True)
                 self.stats.errors += 1
                 await asyncio.sleep(30)  # Wait before retrying
 
@@ -333,10 +440,15 @@ class UnifiedMonitor:
             logger.info(f"Errors: {self.stats.errors}")
             logger.info("Chain Distribution:")
             for chain, count in self.stats.chain_stats.items():
-                quota = self.chain_quotas[chain]
-                sent = self.chain_alerts_sent[chain]
+                quota = self.chain_quotas.get(chain, 0)
+                sent = self.chain_alerts_sent.get(chain, 0)
                 logger.info(f"  {chain}: {count} discovered, {sent}/{quota} alerts sent")
-            logger.info(f"Queue Size: {len(self.alert_queue)}")
+            
+            # --- UPDATED: Statistics for new queues ---
+            logger.info(f"Alert Queue Size: {self.alert_queue.qsize()}")
+            logger.info(f"Holding Queue Size: {len(self.holding_queue)}")
+            # ---
+            
             logger.info("===========================")
 
     async def run(self):
@@ -377,39 +489,49 @@ class UnifiedMonitor:
             await asyncio.gather(*tasks)
 
         except KeyboardInterrupt:
-            logger.info("Received shutdown signal")
+            logger.info("Received shutdown signal (Ctrl+C)")
         except Exception as e:
-            logger.error(f"Fatal error in monitoring system: {e}")
+            logger.error(f"Fatal error in monitoring system: {e}", exc_info=True)
         finally:
-            self.running = False
+            self.running = False # Tell all tasks to stop
+            logger.info("Shutting down... waiting for tasks to finish.")
+            
+            # Give tasks a moment to stop gracefully
+            await asyncio.sleep(2) 
+            
             if self.session:
                 await self.session.close()
-            logger.info("Monitoring system stopped")
+                logger.info("Aiohttp session closed.")
+            
+            await self.telegram.shutdown() # Properly close telegram bot
+            logger.info("Monitoring system stopped.")
 
     def stop(self):
         """Stop the monitoring system"""
         logger.info("Stopping monitoring system...")
         self.running = False
 
-def signal_handler(signum, frame):
-    """Handle shutdown signals"""
-    logger.info(f"Received signal {signum}")
-    if monitor:
-        monitor.stop()
-    sys.exit(0)
-
-
 # Global monitor instance
 monitor: Optional[UnifiedMonitor] = None
 
+
+# --- FIXED: Graceful signal handling ---
+def signal_handler(signum, frame):
+    """Handle shutdown signals"""
+    signal_name = signal.Signals(signum).name
+    logger.info(f"Received signal {signal_name}. Initiating graceful shutdown...")
+    if monitor:
+        monitor.stop()
+    # DO NOT CALL sys.exit() here, let the main loop handle it
+# ---
 
 async def main():
     """Main entry point"""
     global monitor
 
     # Setup signal handlers
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    # SIGINT (Ctrl+C) is handled by the KeyboardInterrupt exception in run()
+    signal.signal(signal.SIGTERM, signal_handler) # Handle "kill" or "docker stop"
 
     # Create and run monitor
     monitor = UnifiedMonitor()

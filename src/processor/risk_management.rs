@@ -91,7 +91,7 @@ impl RiskManagementService {
     }
 
     /// Start the risk management monitoring service
-    pub async fn start(&self) -> Result<(), String> {
+    pub async fn start(&self, cancel_token: CancellationToken) -> Result<(), String> {
         self.logger.log(format!(
             "🚨 Starting risk management service - checking every {} minutes for target balance < {}",
             self.config.check_interval_minutes,
@@ -101,10 +101,16 @@ impl RiskManagementService {
         let mut interval = time::interval(Duration::from_secs(self.config.check_interval_minutes * 60));
 
         loop {
-            interval.tick().await;
-            
-            if let Err(e) = self.check_target_balances().await {
-                self.logger.log(format!("Error during balance check: {}", e).red().to_string());
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    self.logger.log("Risk management service received shutdown signal.".yellow().to_string());
+                    break Ok(());
+                }
+                _ = interval.tick() => {
+                    if let Err(e) = self.check_target_balances().await {
+                        self.logger.log(format!("Error during balance check: {}", e).red().to_string());
+                    }
+                }
             }
         }
     }
@@ -292,7 +298,8 @@ pub async fn start_risk_management_service(
     target_addresses: Vec<String>,
     app_state: Arc<AppState>,
     swap_config: Arc<SwapConfig>,
-) -> Result<(), String> {
+    cancel_token: CancellationToken,
+) -> tokio::task::JoinHandle<Result<(), String>> {
     let logger = Logger::new("[RISK-MANAGEMENT] => ".red().bold().to_string());
     logger.log("Starting risk management service...".green().to_string());
 
@@ -301,10 +308,10 @@ pub async fn start_risk_management_service(
     
     // Start the service in a background task
     tokio::spawn(async move {
-        if let Err(e) = service.start().await {
+        let result = service.start(cancel_token).await;
+        if let Err(e) = &result {
             eprintln!("Risk management service error: {}", e);
         }
-    });
-
-    Ok(())
+        result
+    })
 } 

@@ -225,7 +225,7 @@ class SolanaMonitor:
             signatures = await self.client.get_signatures_for_address(
                 Pubkey.from_string(self.RAYDIUM_AMM_V4),
                 limit=50,
-                before=self.last_signature
+                before=Signature.from_string(self.last_signature) if self.last_signature else None
             )
 
             if signatures and signatures.value:
