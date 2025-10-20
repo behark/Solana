@@ -1,0 +1,146 @@
+# Multi-Chain Monitoring Configuration
+# Educational monitoring system configuration
+
+monitoring:
+  enabled: true
+  chains:
+    solana:
+      enabled: true
+      dexes:
+        - raydium
+        - pump_fun
+        - orca
+      min_liquidity_usd: 10000
+      min_market_cap_usd: 8000
+      min_volume_24h: 3000
+      min_holders: 10
+      max_token_age_hours: 24
+      check_interval_seconds: 3600  # Hourly scans
+
+    ethereum:
+      enabled: false
+      dexes: []
+      min_liquidity_usd: 50000
+      check_interval_seconds: 3600
+
+    bnb:
+      enabled: true
+      dexes:
+        - pancakeswap_v2
+        - pancakeswap_v3
+      min_liquidity_usd: 10000
+      min_market_cap_usd: 8000
+      min_volume_24h: 3000
+      min_holders: 10
+      max_token_age_hours: 24
+      check_interval_seconds: 3600  # Hourly scans
+
+    base:
+      enabled: true
+      dexes:
+        - aerodrome
+        - uniswap_v3
+        - baseswap
+      min_liquidity_usd: 10000
+      min_market_cap_usd: 8000
+      min_volume_24h: 3000
+      min_holders: 10
+      max_token_age_hours: 24
+      check_interval_seconds: 3600  # Hourly scans
+
+    arbitrum:
+      enabled: false
+
+    polygon:
+      enabled: false
+
+    avalanche:
+      enabled: false
+
+    fantom:
+      enabled: false
+
+    cronos:
+      enabled: false
+
+scoring:
+  weights:
+    liquidity: 10              # Max 10 points
+    volume: 20                 # Max 20 points
+    holder_distribution: 15    # Max 15 points
+    contract_verification: 30  # Max 30 points (includes honeypot)
+    social_presence: 15        # Max 15 points
+    website_quality: 5         # Max 5 points
+    token_economics: 20        # Max 20 points
+    team_quality: 15           # Max 15 points
+
+  thresholds:
+    high_confidence: 75        # 🔴 High (75-100): Immediate action
+    medium_confidence: 60      # 🟡 Medium (60-74): Review within 30min
+    low_confidence: 50         # 🟢 Low (50-59): Hourly check
+    minimum_alert: 60          # ⚪ Logged (<60): Filtered out
+
+alerts:
+  daily_target: 500  # Expected 400-600 signals daily
+  distribution:
+    solana: 50      # 50% of alerts (250 daily)
+    ethereum: 0     # Disabled
+    bnb: 45         # 45% of alerts (225 daily)
+    base: 5         # 5% of alerts (25 daily)
+
+  telegram:
+    enabled: true
+    rate_limit_seconds: 1
+    max_queue_size: 100
+    summary_interval_hours: 1  # Hourly summary
+
+  filters:
+    min_score: 60                # Only send alerts with score 60+
+    min_liquidity_usd: 10000     # $10k minimum
+    min_market_cap_usd: 8000     # $8k minimum
+    min_volume_24h: 3000         # $3k minimum volume
+    min_holders: 10              # 10 minimum holders
+    max_token_age_hours: 24      # 24 hours max age
+    max_buy_tax: 5               # 5% max buy tax
+    max_sell_tax: 5              # 5% max sell tax
+    min_twitter_followers: 5     # 5 minimum Twitter followers
+    min_telegram_members: 5      # 5 minimum Telegram members
+    exclude_honeypots: true      # Exclude honeypots
+    exclude_scams: true          # Exclude scam patterns
+
+web_scraping:
+  enabled: true
+  sources:
+    - dexscreener
+    - dextools
+    - birdeye
+  rate_limit_seconds: 2
+
+social_monitoring:
+  enabled: true
+  platforms:
+    twitter:
+      enabled: true
+      min_followers: 5  # Minimum 5 followers
+    telegram:
+      enabled: true
+      min_members: 5  # Minimum 5 members
+    discord:
+      enabled: false
+
+logging:
+  level: INFO
+  file: multichain_monitor.log
+  max_size_mb: 100
+  backup_count: 5
+
+database:
+  enabled: false
+  type: sqlite
+  path: monitoring_data.db
+
+performance:
+  max_concurrent_chains: 4
+  max_concurrent_requests: 10
+  cache_ttl_seconds: 300
+  cleanup_interval_hours: 24

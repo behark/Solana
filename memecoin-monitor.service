@@ -1,0 +1,33 @@
+[Unit]
+Description=Multi-Chain Memecoin Educational Monitor
+Documentation=https://github.com/educational-memecoin-monitor
+After=network.target
+
+[Service]
+Type=simple
+User=behar
+Group=behar
+WorkingDirectory=/home/behar/Desktop/New Folder (12)/solana-copy-sniper-trading-bot
+ExecStart=/usr/bin/python3 /home/behar/Desktop/New Folder (12)/solana-copy-sniper-trading-bot/multichain_alerts.py
+
+# Restart configuration
+Restart=always
+RestartSec=10
+StartLimitInterval=60
+StartLimitBurst=5
+
+# Environment variables
+Environment="PYTHONUNBUFFERED=1"
+StandardOutput=append:/home/behar/Desktop/New Folder (12)/solana-copy-sniper-trading-bot/monitor.log
+StandardError=append:/home/behar/Desktop/New Folder (12)/solana-copy-sniper-trading-bot/monitor-error.log
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+# Resource limits
+MemoryLimit=1G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

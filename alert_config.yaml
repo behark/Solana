@@ -1,0 +1,271 @@
+# Multi-Chain Memecoin Alert System Configuration
+
+# Alert Distribution Settings
+alert_distribution:
+  daily_limit: 500  # Total alerts per day
+
+  # Hourly distribution (UTC times)
+  hourly_quotas:
+    0: 10   # Midnight
+    1: 10
+    2: 10
+    3: 10
+    4: 10
+    5: 10
+    6: 10
+    7: 15   # Morning starts
+    8: 20
+    9: 30   # Peak morning
+    10: 30
+    11: 30
+    12: 25  # Noon
+    13: 25
+    14: 30  # Peak afternoon
+    15: 30
+    16: 30
+    17: 25
+    18: 20
+    19: 20
+    20: 25  # Peak evening
+    21: 25
+    22: 25
+    23: 15  # Late night
+
+  # Chain distribution (must sum to 1.0)
+  chain_quotas:
+    solana: 0.50      # 250 alerts/day (50%)
+    ethereum: 0.00    # 0 alerts/day (DISABLED)
+    bnb: 0.45        # 225 alerts/day (45%)
+    base: 0.05       # 25 alerts/day (5%)
+
+# Scoring Weights Configuration (Out of 100 points)
+scoring_weights:
+  # Main category weights (total = 100 points max)
+  categories:
+    liquidity: 10       # Max 10 points: >$10k liquidity
+    volume: 20          # Max 20 points: $3k min (10pts), $10k+ (20pts)
+    holder_distribution: 15  # Max 15 points: 10-500 holders
+    contract_verification: 30  # Max 30 points: verified+renounced+locked+honeypot
+    social_presence: 10  # Max 10 points: Twitter/Telegram (5+5)
+    team_quality: 5     # Max 5 points: website+GitHub+doxxed
+    token_economics: 10  # Max 10 points: tax<5%+LP locked
+
+  # Liquidity sub-weights
+  liquidity_components:
+    initial_amount: 0.40
+    locked_status: 0.30
+    mcap_ratio: 0.20
+    provider_count: 0.10
+
+  # Holder sub-weights
+  holder_components:
+    distribution: 0.50
+    growth_rate: 0.30
+    unique_buyers: 0.20
+
+  # Security sub-weights
+  security_components:
+    contract_safety: 0.40
+    ownership: 0.20
+    audit: 0.20
+    taxes: 0.20
+
+# Score Thresholds
+thresholds:
+  # Base thresholds for different times
+  high_demand:  # When we need many alerts
+    minimum: 45
+    recommended: 50
+
+  medium_demand:  # Normal periods
+    minimum: 55
+    recommended: 60
+
+  low_demand:  # When we can be selective
+    minimum: 65
+    recommended: 70
+
+  # Confidence levels (Alert Distribution Strategy)
+  confidence_levels:
+    high: 75      # 🔴 High (75-100): Immediate action
+    medium: 60    # 🟡 Medium (60-74): Review within 30min
+    low: 50       # 🟢 Low (50-59): Hourly check
+    skip: 0       # ⚪ Logged (<50): Filtered out
+
+  # Minimum score to send alert
+  minimum_alert_threshold: 60  # Only send alerts with score 60+
+
+# Risk Parameters
+risk_management:
+  # Automatic rejection criteria (Automatic Filters)
+  rejection_criteria:
+    honeypot: true                    # ✅ Instant reject if honeypot
+    liquidity_below: 10000            # ✅ Min $10k liquidity
+    market_cap_below: 8000            # ✅ Min $8k market cap
+    volume_below: 3000                # ✅ Min $3k daily volume
+    holders_below: 10                 # ✅ Min 10 holders
+    top_holder_above: 50              # Max 50% for top holder
+    buy_tax_above: 5                  # ✅ Max 5% buy tax
+    sell_tax_above: 5                 # ✅ Max 5% sell tax
+    token_age_hours_above: 24         # ✅ Max 24 hours old
+    min_twitter_followers: 5          # ✅ Min 5 Twitter followers
+    min_telegram_members: 5           # ✅ Min 5 Telegram members
+    scam_detection: true              # ✅ Enable scam pattern detection
+    verified_contract_required: false # Optional: Set true for strict mode
+
+  # Warning thresholds
+  warning_thresholds:
+    liquidity_not_locked: true
+    ownership_not_renounced: true
+    audit_score_below: 50
+    whale_concentration_above: 0.7
+    similar_tokens_above: 10
+
+# Machine Learning Configuration
+ml_config:
+  # Training parameters
+  min_training_samples: 100
+  retrain_frequency: 100  # Retrain every N outcomes
+
+  # Model parameters
+  success_threshold: 2.0  # 2x = success
+  lookback_window: 24     # Hours to measure success
+
+  # Weight adjustment
+  max_weight_change: 0.1   # Max 10% change per update
+  adjustment_damping: 0.1  # Smooth adjustments
+
+# Data Collection Sources
+data_sources:
+  solana:
+    primary_dex: "raydium"
+    backup_dex: "orca"
+    rpc_endpoints:
+      - "https://api.mainnet-beta.solana.com"
+      - "https://solana-api.projectserum.com"
+
+  ethereum:
+    primary_dex: "uniswap_v3"
+    backup_dex: "uniswap_v2"
+    rpc_endpoints:
+      - "https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY"
+      - "https://mainnet.infura.io/v3/YOUR_KEY"
+
+  bnb:
+    primary_dex: "pancakeswap_v3"
+    backup_dex: "pancakeswap_v2"
+    rpc_endpoints:
+      - "https://bsc-dataseed.binance.org"
+      - "https://bsc-dataseed1.binance.org"
+
+  base:
+    primary_dex: "uniswap_v3"
+    backup_dex: "aerodrome"
+    rpc_endpoints:
+      - "https://mainnet.base.org"
+      - "https://base-mainnet.g.alchemy.com/v2/YOUR_KEY"
+
+# Alert Delivery Configuration
+alert_delivery:
+  # Webhook endpoints
+  webhooks:
+    primary: "https://your-webhook.com/alerts"
+    backup: "https://backup-webhook.com/alerts"
+
+  # Rate limiting
+  rate_limits:
+    max_per_minute: 10
+    max_per_hour: 100
+
+  # Retry configuration
+  retry:
+    max_attempts: 3
+    backoff_seconds: [5, 15, 30]
+
+  # Alert format
+  format:
+    include_metrics: true
+    include_confidence: true
+    include_warnings: true
+    include_action: true
+    max_warnings: 5
+
+# Monitoring Configuration
+monitoring:
+  # Performance tracking
+  track_outcomes: true
+  outcome_check_delay: 86400  # 24 hours in seconds
+
+  # Logging
+  log_level: "INFO"
+  log_file: "alerts.log"
+
+  # Metrics collection
+  metrics_retention_days: 30
+
+  # Health checks
+  health_check_interval: 60  # seconds
+
+# Cache Configuration
+cache:
+  redis:
+    host: "localhost"
+    port: 6379
+    db: 0
+
+  # TTL settings (seconds)
+  ttl:
+    token_data: 86400      # 24 hours
+    alerts: 3600           # 1 hour
+    social_data: 900       # 15 minutes
+    price_data: 60         # 1 minute
+
+# API Configuration
+api:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+
+  # Rate limiting
+  rate_limit:
+    requests_per_minute: 60
+    requests_per_hour: 1000
+
+  # Authentication (optional)
+  auth:
+    enabled: false
+    api_keys: []
+
+# Feature Flags
+features:
+  # ML optimization
+  ml_optimization: true
+  auto_weight_adjustment: true
+
+  # Advanced filtering
+  similar_token_detection: true
+  influencer_detection: true
+
+  # Risk management
+  auto_risk_scoring: true
+  honeypot_detection: true
+
+  # Chain-specific
+  solana_sniper_detection: true
+  eth_mev_protection: false
+
+# Performance Tuning
+performance:
+  # Concurrent processing
+  max_concurrent_tokens: 50
+  max_concurrent_api_calls: 10
+
+  # Batching
+  batch_size: 10
+  batch_timeout: 5  # seconds
+
+  # Circuit breaker
+  circuit_breaker:
+    enabled: true
+    failure_threshold: 5
+    recovery_timeout: 60  # seconds

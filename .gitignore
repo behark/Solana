@@ -2,20 +2,23 @@ buy-grpc
 .env
 target
 blacklist.txt
+
 # Rust build artifacts
 /target
 **/*.rs.bk
 source
 Cargo.lock
 solana-rpc-client-2.1.14
+
 # IDE files
 .idea/
 .vscode/
 *.iml
-backend
+
 # Environment files
 .env
 .env.*
+backend
 
 # Transaction records
 /record/
@@ -24,4 +27,45 @@ backend
 /record/raydium/
 
 # Logs
-*.log 
+*.log
+monitor.log
+monitor-error.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Project specific
+token_queue.json
+*.json.bak
+monitor.pid
+
+# Service files (don't commit fixed version)
+memecoin-monitor.service.fixed
+
+# Sensitive data
+config/secrets.yaml
+credentials.json
+*.key
+*.pem 
